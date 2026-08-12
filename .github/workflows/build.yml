@@ -61,7 +61,7 @@ jobs:
           New-Item -ItemType Directory -Path (Join-Path $env:GITHUB_WORKSPACE 'artifact') -Force | Out-Null
           Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $env:GITHUB_WORKSPACE 'artifact\Timelapse.dll')
           Get-FileHash -Algorithm SHA256 (Join-Path $env:GITHUB_WORKSPACE 'artifact\Timelapse.dll') | Format-List
-          & dumpbin.exe /headers (Join-Path $env:GITHUB_WORKSPACE 'artifact\Timelapse.dll') | Select-String -Pattern 'machine'
+        
 
       - name: Upload Timelapse DLL
         uses: actions/upload-artifact@v4
