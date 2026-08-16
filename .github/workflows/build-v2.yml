@@ -48,8 +48,8 @@ jobs:
           $resourcePath = Join-Path $env:GITHUB_WORKSPACE 'source\Timelapse\Timelapse.rc'
           $resource = Get-Content -LiteralPath $resourcePath -Raw
           $resource = $resource.Replace(
-            'D:\JP\Desktop\Timelapse\Timelapse.ico',
-            '..\Timelapse.ico'
+            'D:\\JP\\Desktop\\Timelapse\\Timelapse.ico',
+            '..\\Timelapse.ico'
           )
           Set-Content -LiteralPath $resourcePath -Value $resource -Encoding unicode
 
