@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - timelapse-v10-holy-symbol-test-full.patch
-      - .github/workflows/build-current.yml
+      - .github/workflows/build-current-v10.yml
   workflow_dispatch:
 
 permissions:
