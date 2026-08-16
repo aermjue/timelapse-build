@@ -1,0 +1,199 @@
+--- a/Timelapse/Addresses.h
++++ b/Timelapse/Addresses.h
+@@ -169,8 +169,8 @@
+ ULONG PtInRectAddr = 0xBF0484;
+ 
+ ULONG LoginBase = 0xBEDED4; //CLogin
+-ULONG OFS_LoginStep = 0x168; //0 = login screen or logged in, 1 = Select World/Channel, 2 = Select Char
+-ULONG OFS_LoginScreen = 0x174; //255 == login screen, 1 == loggin in, 0 = logged in
++ULONG OFS_LoginStep = 0x168; //DWORD state: 0..5 (1 = world/channel, 2 = character select)
++ULONG OFS_LoginScreen = 0x174; //Raw server/login option byte; not a reliable screen detector by itself
+ 
+ // CUILogin and its two CCtrlEdit members. These were verified against the
+ // supplied BeiDou.exe (GMS v83). Unlike screen coordinates, these object
+@@ -179,6 +179,7 @@
+ ULONG OFS_UILoginUsernameEdit = 0xCC;
+ ULONG OFS_UILoginPasswordEdit = 0xD4;
+ ULONG CCtrlEditSetTextAddr = 0x004CC512;
++ULONG CUILoginOnButtonClickedAddr = 0x00620CA5;
+ ULONG CUILoginVTable = 0x00AF7940;
+ ULONG CCtrlEditVTable = 0x00AF2BA8;
+ 
+--- a/Timelapse/MapleFunctions.h
++++ b/Timelapse/MapleFunctions.h
+@@ -43,14 +43,13 @@
+ 		if (login == 0)
+ 			return false;
+ 
+-		loginStep = *(BYTE*)(login + OFS_LoginStep);
++		// This member is a DWORD in the supplied client. CLogin::SetStep stores
++		// all six values (0..5); reading one byte and rejecting 3..5 caused the
++		// world selector to be reported as "Disconnected / waiting".
++		loginStep = *(int*)(login + OFS_LoginStep);
+ 		loginScreen = *(BYTE*)(login + OFS_LoginScreen);
+ 
+-		// Known v83 states: step 0 = login/in-game, 1 = world/channel,
+-		// 2 = character selection; screen 255 = login, 1 = connecting,
+-		// 0 = authenticated/in-game.
+-		return loginStep >= 0 && loginStep <= 2 &&
+-			(loginScreen == 0 || loginScreen == 1 || loginScreen == 255);
++		return loginStep >= 0 && loginStep <= 5;
+ 	}
+ 	__except (EXCEPTION_EXECUTE_HANDLER) {
+ 		loginStep = -1;
+@@ -59,6 +58,19 @@
+ 	}
+ }
+ 
++// The CUILogin singleton is the authoritative login-page signal. Offset
++// +0x174 also carries values 0, 1, 2 and 255 in normal server replies, so it
++// must not be used as a screen enum.
++static bool HasMapleLoginUI() {
++	__try {
++		ULONG uiLogin = *(ULONG*)UILoginBase;
++		return uiLogin != 0 && *(ULONG*)uiLogin == CUILoginVTable;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
+ static bool HasMapleLocalPlayer() {
+ 	__try {
+ 		return *(ULONG*)UserLocalBase != 0;
+--- a/Timelapse/MainForm.cpp
++++ b/Timelapse/MainForm.cpp
+@@ -556,15 +556,18 @@
+ 		int loginStep = -1;
+ 		int loginScreen = -1;
+ 		String^ sessionText = "Disconnected / waiting";
+-		if (TryGetMapleLoginState(loginStep, loginScreen)) {
+-			if (loginScreen == 255)
+-				sessionText = "Login screen";
+-			else if (loginScreen == 1)
+-				sessionText = "Logging in...";
+-			else if (loginStep == 1)
++		if (HasMapleLoginUI()) {
++			sessionText = "Login screen";
++		}
++		else if (TryGetMapleLoginState(loginStep, loginScreen)) {
++			if (loginStep == 1 || loginStep == 5)
+ 				sessionText = "Selecting world / channel";
+ 			else if (loginStep == 2)
+ 				sessionText = "Selecting character";
++			else if (loginStep == 0)
++				sessionText = "Logging in...";
++			else
++				sessionText = "Login transition (state " + loginStep.ToString() + ")";
+ 		}
+ 
+ 		// Never leave stale character/map data visible after a disconnect.
+@@ -706,6 +709,29 @@
+ 		return false;
+ 	}
+ }
++
++static bool SubmitMapleLoginNative() {
++	try {
++		// CUILogin::OnButtonClicked(1000) is the actual Connect-button path.
++		// Validate both the function prologue and object vtable before calling
++		// it so a different v83 client build fails closed instead of crashing.
++		if (*(ULONG*)CUILoginOnButtonClickedAddr != 0xA9B668B8)
++			return false;
++
++		ULONG uiLogin = *(ULONG*)UILoginBase;
++		if (uiLogin == 0 || *(ULONG*)uiLogin != CUILoginVTable)
++			return false;
++
++		typedef void(__thiscall *pfnCUILogin__OnButtonClicked)(PVOID, int);
++		static pfnCUILogin__OnButtonClicked CUILogin__OnButtonClicked =
++			reinterpret_cast<pfnCUILogin__OnButtonClicked>(CUILoginOnButtonClickedAddr);
++		CUILogin__OnButtonClicked((PVOID)uiLogin, 1000);
++		return true;
++	}
++	catch (...) {
++		return false;
++	}
++}
+ #pragma managed
+ 
+ static bool SetMapleLoginField(String^ text, ULONG fieldOffset) {
+@@ -816,28 +842,26 @@
+ 		SetAutoLoginStatus("waiting for the client login state");
+ 		return;
+ 	}
++	bool loginUIActive = HasMapleLoginUI();
+ 
+ 	bool stateChanged = loginStep != GlobalRefs::autoLoginLastStep || loginScreen != GlobalRefs::autoLoginLastScreen;
+ 	if (stateChanged) {
+ 		GlobalRefs::autoLoginLastStep = loginStep;
+ 		GlobalRefs::autoLoginLastScreen = loginScreen;
+ 
+-		if (loginScreen == 255) {
++		if (loginUIActive) {
+ 			GlobalRefs::autoLoginPhase = AUTOLOGIN_USERNAME;
+-			// A failed attempt normally transitions 255 -> 1 -> 255. Preserve
+-			// a retry delay on that path so an incorrect password cannot hammer
+-			// the private server continuously.
++			// Preserve a retry delay after a rejected attempt so an incorrect
++			// password cannot hammer the private server continuously.
+ 			if (GlobalRefs::autoLoginAttempts > 0)
+ 				GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(GlobalRefs::autoLoginAttempts % 3 == 0 ? 60 : 8);
+ 			else
+ 				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(300);
+ 			SetAutoLoginStatus("login screen detected");
+ 		}
+-		else if (loginScreen == 1) {
+-			SetAutoLoginStatus("credentials submitted; waiting for server");
+-		}
+-		else if (loginStep == 1) {
+-			GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
++		else if (loginStep == 1 || loginStep == 5) {
++			if (GlobalRefs::autoLoginPhase < AUTOLOGIN_WORLD || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHANNEL)
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
+ 			GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(800);
+ 			SetAutoLoginStatus("world/channel screen detected");
+ 		}
+@@ -851,7 +875,7 @@
+ 	if (DateTime::Now < GlobalRefs::autoLoginNextAction)
+ 		return;
+ 
+-	if (loginScreen == 255 && loginStep == 0) {
++	if (loginUIActive) {
+ 		switch (GlobalRefs::autoLoginPhase) {
+ 			case AUTOLOGIN_IDLE:
+ 			case AUTOLOGIN_USERNAME:
+@@ -877,12 +901,11 @@
+ 				return;
+ 
+ 			case AUTOLOGIN_CONNECT:
+-				if (!FocusMapleWindow()) {
+-					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(2);
+-					SetAutoLoginStatus("waiting for the MapleStory window");
++				if (!SubmitMapleLoginNative()) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++					SetAutoLoginStatus("waiting for the internal Connect control");
+ 					return;
+ 				}
+-				TapPhysicalKey(VK_RETURN);
+ 				GlobalRefs::autoLoginAttempts++;
+ 				GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_LOGIN;
+ 				GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(8);
+@@ -903,7 +926,7 @@
+ 		}
+ 	}
+ 
+-	if (loginScreen == 0 && loginStep == 1) {
++	if (!loginUIActive && (loginStep == 1 || loginStep == 5)) {
+ 		if (GlobalRefs::autoLoginPhase < AUTOLOGIN_WORLD || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHANNEL)
+ 			GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
+ 
+@@ -929,7 +952,7 @@
+ 		return;
+ 	}
+ 
+-	if (loginScreen == 0 && loginStep == 2) {
++	if (!loginUIActive && loginStep == 2) {
+ 		if (GlobalRefs::autoLoginPhase < AUTOLOGIN_CHARACTER || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHARACTER)
+ 			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHARACTER;
+ 
