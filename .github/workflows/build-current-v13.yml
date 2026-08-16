@@ -48,7 +48,7 @@ jobs:
             [System.Text.UTF8Encoding]::new($false)
           )
 
-          $expectedHash = 'e0d93cc6d54a02ec68e973dd775621db2bdd52fc2aca665122e31ee79ee8f7d5'
+          $expectedHash = 'a9e872b232e053640e7eea73049fd665386665cb1b635a973b99065626232f75'
           $actualHash = (Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualHash -ne $expectedHash) {
             throw "Wrong V13 patch. Expected SHA256 $expectedHash, got $actualHash."
