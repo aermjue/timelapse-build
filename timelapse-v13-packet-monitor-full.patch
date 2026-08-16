@@ -1,0 +1,3039 @@
+diff --git a/Timelapse/Addresses.h b/Timelapse/Addresses.h
+index a7a2e35e08ca2019add32717f471fa5b1ad346fd..8cce3b8f5b6d712ed47aa87625508875c5414a22 100644
+--- a/Timelapse/Addresses.h
++++ b/Timelapse/Addresses.h
+@@ -45,6 +45,11 @@ ULONG infiniteChatboxAddr1 = 0x004CAA09;
+ ULONG infiniteChatboxAddr2 = 0x004CAA84;
+ ULONG noBlueBoxesAddr = 0x009929DD;
+ ULONG walkingFrictionAddr = 0x009B4365; // je -> jne
++// Client-stat patches recovered from the supplied v83 trainer. These are
++// fixed addresses in the same GMS v83 client targeted by Timelapse.
++ULONG sharpEyesPatchAddr = 0x00BF4330;
++ULONG dualAttackPhysicalAddr = 0x00BF3D60;
++ULONG dualAttackMagicAddr = 0x00BF3DC0;
+ 
+ //Vac Tabs
+ ULONG fullMapAttackAddr = 0x006785CA;
+@@ -169,8 +174,29 @@ auto CWvsContext__GetCharacterData = reinterpret_cast<pfnCWvsContext__GetCharact
+ ULONG PtInRectAddr = 0xBF0484;
+ 
+ ULONG LoginBase = 0xBEDED4; //CLogin
+-ULONG OFS_LoginStep = 0x168; //0 = login screen or logged in, 1 = Select World/Channel, 2 = Select Char
+-ULONG OFS_LoginScreen = 0x174; //255 == login screen, 1 == loggin in, 0 = logged in
++ULONG OFS_LoginStep = 0x168; //DWORD state: 0..5 (1 = world/channel, 2 = character select)
++ULONG OFS_LoginScreen = 0x174; //Raw server/login option byte; not a reliable screen detector by itself
++
++// CUILogin and its two CCtrlEdit members. These were verified against the
++// supplied BeiDou.exe (GMS v83). Unlike screen coordinates, these object
++// offsets are unchanged by the client's high-resolution ijl15.dll patches.
++ULONG UILoginBase = 0xBEDA60;
++ULONG OFS_UILoginUsernameEdit = 0xCC;
++ULONG OFS_UILoginPasswordEdit = 0xD4;
++ULONG CCtrlEditSetTextAddr = 0x004CC512;
++ULONG CUILoginOnButtonClickedAddr = 0x00620CA5;
++ULONG CUILoginVTable = 0x00AF7940;
++ULONG CCtrlEditVTable = 0x00AF2BA8;
++
++// Native world/channel and character-selection paths. These are the same
++// functions called by BeiDou.exe's own channel and avatar controls, so they
++// remain independent of resolution, cursor position and keyboard focus.
++ULONG OFS_LoginWorldList = 0x18C;
++ULONG OFS_LoginSelectedCharacter = 0x190;
++ULONG UIAvatarBase = 0xBEDA4C;
++ULONG CUIAvatarVTable = 0x00AF6F04;
++ULONG CUIAvatarSelectAvatarAddr = 0x0060599B;
++ULONG CUIAvatarOnKeyAddr = 0x00604F85;
+ 
+ ULONG UIInfoBase = 0xBEC208; 
+ ULONG OFS_HP = 0xD18;
+@@ -253,4 +279,4 @@ ULONG OFS_MobCount = 0x24;
+ 
+ ULONG CItemInfo = 0xBE78D8;
+ ULONG StringPool = 0xBF0D0C;
+-#pragma endregion
+\ No newline at end of file
++#pragma endregion
+diff --git a/Timelapse/Log.cpp b/Timelapse/Log.cpp
+index 3d84ec714f2a5a30d02ab80ddb3cab3678210e70..2c2d0ae2a41ecbf2cd90a9cba15f09efd166c691 100644
+--- a/Timelapse/Log.cpp
++++ b/Timelapse/Log.cpp
+@@ -31,6 +31,7 @@ String^ Log::GetLogPath() {
+ 
+ 	try {
+ 		String^ TimelapseFolderPath = Path::Combine(AppDataFolder, "Timelapse");
++		Directory::CreateDirectory(TimelapseFolderPath);
+ 		LogsFilePath = Path::Combine(TimelapseFolderPath, "Log.txt");
+ 	} 
+ 	catch (Exception^){}
+diff --git a/Timelapse/Macro.h b/Timelapse/Macro.h
+index 023ca14fa8b6bfae4ce71288b75dff4e4cd4e6b8..d484aca3ad6c473fa441d7f8609192aa882d96a3 100644
+--- a/Timelapse/Macro.h
++++ b/Timelapse/Macro.h
+@@ -25,20 +25,24 @@ typedef struct tag_KEYDATA {
+ 	BYTE flagUp : 1;
+ } KEYDATA;
+ 
+-static DWORD createKeyData(int Key) {
+-	KEYDATA kd;
+-	memset(&kd, 0, sizeof(KEYDATA));
+-	kd.keyRepeatCnt = 1;
+-	kd.keyScanCode = static_cast<BYTE>(MapVirtualKey(Key, 0));
+-	kd.flagExtendedKey = 0;
+-	kd.Reserved = 0;
+-	kd.flagAltDown = 0; // this has to be 0 else no lumping of messages
+-	kd.flagRepeat = 1; // this is necessary for proper execution in maplestory
+-	kd.flagUp = 0;
+-	DWORD dwVal;
+-	memcpy(&dwVal, &kd, sizeof(DWORD));
++static bool isExtendedKey(int key) {
++	switch (key) {
++		case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
++		case VK_PRIOR: case VK_NEXT: case VK_LEFT: case VK_RIGHT:
++		case VK_UP: case VK_DOWN: case VK_RCONTROL: case VK_RMENU:
++			return true;
++		default:
++			return false;
++	}
++}
+ 
+-	return dwVal;
++static LPARAM createKeyData(int key, bool keyUp) {
++	LPARAM keyData = 1 | (MapVirtualKey(key, MAPVK_VK_TO_VSC) << 16);
++	if (isExtendedKey(key))
++		keyData |= (1 << 24);
++	if (keyUp)
++		keyData |= 0xC0000000;
++	return keyData;
+ }
+ 
+ ref struct KeyMacro {
+@@ -53,10 +57,10 @@ ref struct KeyMacro {
+ 	// basically this represents magical keyboard which repeatedly presses keys down but doesn't need any kind of going up with keys
+ 	// thus this non-physical keyboard will cause certain skills like charge abilities to be permanently stuck charging
+ 	static void SendKey(int Key) {
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("SendKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 		}
+ 	}
+ 
+@@ -66,35 +70,33 @@ ref struct KeyMacro {
+ 	// then OS should lump these into one message and process it much faster
+ 	static void SpamSendKey(int Key, int times) {	
+ 		for (int i = 0; i < times; i++) {
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 			 if (DBG_Macro) {
+ 				 Log::WriteLineToConsole("SpamSendKey: ERROR failed to post message to process!");
+-				 Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++				 Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 			 }
+ 		}
+ 	}
+ 
+ 	// This simulates repeated bashing of a keystroke on a regular physical keyboard
+ 	static void PressKey(int Key) {
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("PressKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 		}
+-		//WM_CHAR
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key, true));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("PressKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYUP " + "KeyData: " + createKeyData(Key, true));
+ 		}
+ 	}
+ 
+ 	// unused for now
+ 	static void SpamPressKey(int Key, int times) {
+ 		for (int i = 0; i < times; i++) {
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
+-			//WM_CHAR
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key, true));
+ 		}
+ 	}
+ };
+@@ -104,17 +106,42 @@ public:
+ 	static cliext::priority_queue<KeyMacro^>^ macroQueue = gcnew cliext::priority_queue<KeyMacro^>();
+ 	static bool closeMacroQueue = false;
+ 
++	static void Push(KeyMacro^ key) {
++		Threading::Monitor::Enter(macroQueue);
++		try {
++			macroQueue->push(key);
++		}
++		finally {
++			Threading::Monitor::Exit(macroQueue);
++		}
++	}
++
++	static bool TryPop(KeyMacro^% key) {
++		key = nullptr;
++		Threading::Monitor::Enter(macroQueue);
++		try {
++			if (macroQueue->empty())
++				return false;
++			key = macroQueue->top();
++			macroQueue->pop();
++			return true;
++		}
++		finally {
++			Threading::Monitor::Exit(macroQueue);
++		}
++	}
++
+ 	static void MacroQueueWorker() {
+ 		if (GlobalVars::mapleWindow == nullptr) 
+ 			GlobalVars::mapleWindow = GetMSWindowHandle();
+ 
+ 		while(!closeMacroQueue) {
+-			if (macroQueue == nullptr || macroQueue->empty())
++			KeyMacro^ key = nullptr;
++			if (!TryPop(key)) {
++				Threading::Thread::Sleep(1);
+ 				continue;
+-			
+-			Threading::Monitor::Enter(macroQueue);
+-			KeyMacro ^key = macroQueue->top();
+-			macroQueue->pop();		
++			}
++
+ 			if (DBG_Macro) Log::WriteLineToConsole("MacroQueueSizeAfterPop: " + macroQueue->size());
+ 
+ 			switch(key->macroType) {
+@@ -142,13 +169,13 @@ public:
+ 						KeyMacro::SpamSendKey(key->keyCode, 2);
+ 					break;
+ 			}
+-			Threading::Monitor::Exit(macroQueue);
+ 		}
+ 	}
+ };
+ 
+ ref class Macro {
+ 	Threading::Timer^ timer;
++	bool enabled;
+ 
+ 	void SendKeyMacroToQueue() {
+ 		if (DBG_Macro) Log::WriteLineToConsole("Entered SendKeyToQueue");
+@@ -161,7 +188,7 @@ ref class Macro {
+ 			// TODO: buffs need better handling
+ 			case MacroType::BUFFMACRO:		
+ 				if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-				PriorityQueue::macroQueue->push(keyMacro);
++				PriorityQueue::Push(keyMacro);
+ 			break;
+ 			case MacroType::HPPOTMACRO:
+ 				if (MacrosEnabled::bMacroHP && HelperFuncs::IsInGame()) {
+@@ -171,7 +198,7 @@ ref class Macro {
+ 
+ 					if (hpCntCurrent < hpCntDrinkLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -183,7 +210,7 @@ ref class Macro {
+ 
+ 					if (mpCntCurrent < mpCntDrinkLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -195,7 +222,7 @@ ref class Macro {
+ 
+ 					if (itemCntCurrent > itemCntLootLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -207,7 +234,7 @@ ref class Macro {
+ 
+ 					if (mobCntCurrent > mobCntAttackLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -250,6 +277,7 @@ public:
+ 		this->keyCode = keyCode;
+ 		this->delay = delay;
+ 		this->macroType = macro;
++		this->enabled = false;
+ 		if (DBG_Macro) DebugMacro(this);
+ 		Threading::TimerCallback^ TimerDelegate = gcnew Threading::TimerCallback(this, &Macro::TimerElapsed);
+ 		timer = gcnew Threading::Timer(TimerDelegate, nullptr, Threading::Timeout::Infinite, delay);
+@@ -259,9 +287,13 @@ public:
+ 	// TODO: if buffMacro check if i have it present if not cast it for first time
+ 	void Toggle(bool enable) {	
+ 		if (enable) {
++			if (!enabled && macroType == MacroType::BUFFMACRO)
++				SendKeyMacroToQueue();
++			enabled = true;
+ 			timer->Change(delay, delay);			
+ 		}				
+ 		else {
++			enabled = false;
+ 			timer->Change(Threading::Timeout::Infinite, Threading::Timeout::Infinite);					
+ 		}
+ 	}
+diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
+index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..becd5cefaa5fbe2436aef4fd4d43765b7a2f53c0 100644
+--- a/Timelapse/MainForm.cpp
++++ b/Timelapse/MainForm.cpp
+@@ -16,6 +16,7 @@ using namespace Timelapse;
+ 
+ //Forward declarations
+ void AutoLogin();
++void ProcessAutoLogin();
+ static void loadMaps(); 
+ static void mapRush(int destMapID); 
+ 
+@@ -24,6 +25,7 @@ ref struct GlobalRefs {
+ 	static Macro ^macroHP, ^macroMP, ^macroAttack, ^macroLoot;
+ 	static bool isChangingField = false, isMapRushing = false;
+ 	static bool bClickTeleport = false, bMouseTeleport = false, bTeleport = false, bKami = false, bKamiLoot = false;
++	static UINT clickTeleportDelay = 100, mouseTeleportDelay = 100;
+ 	static bool bWallVac = false, bDupeX = false, bMMC = false, bUEMI = false;
+ 	static UINT cccsTimerTickCount = 0;
+ 	static bool isDragging = false, isEmbedding = false;
+@@ -32,6 +34,10 @@ ref struct GlobalRefs {
+ 	static double formOpacity;
+ 	static Generic::List<MapData^>^ maps;
+ 	static bool bSendPacketLog = false, bRecvPacketLog = false;
++	static DateTime packetSpamNextAction = DateTime::MinValue;
++	static int autoLoginPhase = 0, autoLoginLastStep = -1, autoLoginLastScreen = -1, autoLoginAttempts = 0;
++	static DateTime autoLoginNextAction;
++	static String^ autoLoginLastStatus = nullptr;
+ };
+ 
+ #pragma region General Form
+@@ -73,6 +79,12 @@ void MainForm::MainForm_Load(Object^  sender, EventArgs^  e) {
+ 	Log::WriteLineToConsole(":::::::::::::::::::::::::::::::::::::::::");
+ 	Log::WriteLineToConsole("Use: Extreme Injector v3.7.2");
+ 	Log::WriteLineToConsole("Initializing Timelapse trainer ....");
++	// The original packet block lists were Details views without columns,
++	// which made every entry invisible.  A simple list is clearer here.
++	lvSendBlock->View = Windows::Forms::View::List;
++	lvSendBlock->CheckBoxes = false;
++	lvRecvBlock->View = Windows::Forms::View::List;
++	lvRecvBlock->CheckBoxes = false;
+ 	RECT msRect;
+ 	GetWindowRect(GetMSWindowHandle(), &msRect);
+ 	this->Left = msRect.right;
+@@ -112,6 +124,7 @@ void MainForm::MainForm_FormClosing(Object^  sender, Windows::Forms::FormClosing
+ 	GlobalRefs::bKami = false, GlobalRefs::bKamiLoot = false;
+ 	GlobalRefs::isDragging = false;
+ 	PriorityQueue::closeMacroQueue = true;
++	PacketMonitor::Shutdown();
+ 
+ 	for (double i = this->Opacity; i > 0;) {
+ 		i -= 0.1;
+@@ -164,12 +177,185 @@ void MainForm::pnlFull_MouseMove(Object^  sender, Windows::Forms::MouseEventArgs
+ #pragma endregion
+ 
+ #pragma region ToolStrip
++static String^ GetSettingsProfilesDirectory() {
++	try {
++		String^ documentsDirectory = Environment::GetFolderPath(Environment::SpecialFolder::MyDocuments);
++		if (!String::IsNullOrWhiteSpace(documentsDirectory)) {
++			String^ profilesDirectory = Path::Combine(documentsDirectory, "Timelapse Profiles");
++			Directory::CreateDirectory(profilesDirectory);
++			return profilesDirectory;
++		}
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Unable to create settings profiles in Documents: " + ex->Message);
++	}
++
++	String^ fallbackDirectory = Path::Combine(Path::GetDirectoryName(Settings::GetSettingsPath()), "Profiles");
++	Directory::CreateDirectory(fallbackDirectory);
++	return fallbackDirectory;
++}
++
++static String^ PromptForSettingsProfileName(Form^ owner) {
++	String^ profilesDirectory = GetSettingsProfilesDirectory();
++	Form^ dialog = gcnew Form();
++	dialog->Text = "Save Timelapse Settings Profile";
++	dialog->FormBorderStyle = FormBorderStyle::FixedDialog;
++	dialog->StartPosition = FormStartPosition::CenterParent;
++	dialog->ClientSize = System::Drawing::Size(470, 155);
++	dialog->MaximizeBox = false;
++	dialog->MinimizeBox = false;
++	dialog->ShowIcon = false;
++	dialog->ShowInTaskbar = false;
++
++	Label^ nameLabel = gcnew Label();
++	nameLabel->Text = "Profile name:";
++	nameLabel->Location = Point(15, 20);
++	nameLabel->AutoSize = true;
++	dialog->Controls->Add(nameLabel);
++
++	TextBox^ nameBox = gcnew TextBox();
++	nameBox->Location = Point(110, 17);
++	nameBox->Size = System::Drawing::Size(340, 23);
++	nameBox->Text = "farming";
++	nameBox->SelectAll();
++	dialog->Controls->Add(nameBox);
++
++	Label^ pathLabel = gcnew Label();
++	pathLabel->Text = "Saved in: " + profilesDirectory;
++	pathLabel->Location = Point(15, 58);
++	pathLabel->Size = System::Drawing::Size(435, 34);
++	pathLabel->AutoEllipsis = true;
++	dialog->Controls->Add(pathLabel);
++
++	Button^ saveButton = gcnew Button();
++	saveButton->Text = "Save";
++	saveButton->Location = Point(285, 108);
++	saveButton->Size = System::Drawing::Size(78, 28);
++	saveButton->DialogResult = System::Windows::Forms::DialogResult::OK;
++	dialog->Controls->Add(saveButton);
++
++	Button^ cancelButton = gcnew Button();
++	cancelButton->Text = "Cancel";
++	cancelButton->Location = Point(372, 108);
++	cancelButton->Size = System::Drawing::Size(78, 28);
++	cancelButton->DialogResult = System::Windows::Forms::DialogResult::Cancel;
++	dialog->Controls->Add(cancelButton);
++
++	dialog->AcceptButton = saveButton;
++	dialog->CancelButton = cancelButton;
++	dialog->ActiveControl = nameBox;
++	if (dialog->ShowDialog(owner) != System::Windows::Forms::DialogResult::OK)
++		return nullptr;
++
++	String^ profileName = nameBox->Text->Trim();
++	if (profileName->EndsWith(".xml", StringComparison::OrdinalIgnoreCase))
++		profileName = profileName->Substring(0, profileName->Length - 4)->Trim();
++
++	if (String::IsNullOrWhiteSpace(profileName) || profileName->IndexOfAny(Path::GetInvalidFileNameChars()) >= 0 || profileName->EndsWith(".")) {
++		MessageBox::Show(owner, "Please enter a valid profile name.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Warning);
++		return nullptr;
++	}
++
++	String^ settingsPath = Path::Combine(profilesDirectory, profileName + ".xml");
++	if (File::Exists(settingsPath) && MessageBox::Show(owner, "The profile already exists. Overwrite it?\n" + settingsPath,
++		"Timelapse Settings", MessageBoxButtons::YesNo, MessageBoxIcon::Question) != System::Windows::Forms::DialogResult::Yes)
++		return nullptr;
++
++	return settingsPath;
++}
++
++static String^ PromptForSettingsProfile(Form^ owner) {
++	String^ profilesDirectory = GetSettingsProfilesDirectory();
++	Generic::List<String^>^ profilePaths = gcnew Generic::List<String^>();
++	Form^ dialog = gcnew Form();
++	dialog->Text = "Open Timelapse Settings Profile";
++	dialog->FormBorderStyle = FormBorderStyle::FixedDialog;
++	dialog->StartPosition = FormStartPosition::CenterParent;
++	dialog->ClientSize = System::Drawing::Size(470, 350);
++	dialog->MaximizeBox = false;
++	dialog->MinimizeBox = false;
++	dialog->ShowIcon = false;
++	dialog->ShowInTaskbar = false;
++
++	Label^ pathLabel = gcnew Label();
++	pathLabel->Text = "Profiles in: " + profilesDirectory;
++	pathLabel->Location = Point(15, 15);
++	pathLabel->Size = System::Drawing::Size(435, 34);
++	pathLabel->AutoEllipsis = true;
++	dialog->Controls->Add(pathLabel);
++
++	ListBox^ profileList = gcnew ListBox();
++	profileList->Location = Point(15, 55);
++	profileList->Size = System::Drawing::Size(435, 235);
++	dialog->Controls->Add(profileList);
++
++	String^ defaultSettingsPath = Settings::GetSettingsPath();
++	if (File::Exists(defaultSettingsPath)) {
++		profileList->Items->Add("Default (legacy Settings.xml)");
++		profilePaths->Add(defaultSettingsPath);
++	}
++
++	try {
++		for each(String^ profilePath in Directory::GetFiles(profilesDirectory, "*.xml")) {
++			profileList->Items->Add(Path::GetFileNameWithoutExtension(profilePath));
++			profilePaths->Add(profilePath);
++		}
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Unable to list settings profiles: " + ex->Message);
++		MessageBox::Show(owner, "Settings profiles could not be listed. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
++		return nullptr;
++	}
++
++	if (profileList->Items->Count == 0) {
++		MessageBox::Show(owner, "No saved profiles were found. Use Save Settings first.\n\nProfile folder:\n" + profilesDirectory,
++			"Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++		return nullptr;
++	}
++	profileList->SelectedIndex = 0;
++
++	Button^ openButton = gcnew Button();
++	openButton->Text = "Open";
++	openButton->Location = Point(285, 305);
++	openButton->Size = System::Drawing::Size(78, 28);
++	openButton->DialogResult = System::Windows::Forms::DialogResult::OK;
++	dialog->Controls->Add(openButton);
++
++	Button^ cancelButton = gcnew Button();
++	cancelButton->Text = "Cancel";
++	cancelButton->Location = Point(372, 305);
++	cancelButton->Size = System::Drawing::Size(78, 28);
++	cancelButton->DialogResult = System::Windows::Forms::DialogResult::Cancel;
++	dialog->Controls->Add(cancelButton);
++
++	dialog->AcceptButton = openButton;
++	dialog->CancelButton = cancelButton;
++	if (dialog->ShowDialog(owner) != System::Windows::Forms::DialogResult::OK || profileList->SelectedIndex < 0)
++		return nullptr;
++
++	return profilePaths[profileList->SelectedIndex];
++}
++
+ void MainForm::loadSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+-	Settings::Deserialize(this, Settings::GetSettingsPath());
++	String^ settingsPath = PromptForSettingsProfile(this);
++	if (String::IsNullOrWhiteSpace(settingsPath))
++		return;
++
++	if (Settings::Deserialize(this, settingsPath))
++		MessageBox::Show("Settings loaded successfully from:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++	else
++		MessageBox::Show("The settings file exists but could not be loaded. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
+ }
+ 
+ void MainForm::saveSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+-	Settings::Serialize(this, Settings::GetSettingsPath());
++	String^ settingsPath = PromptForSettingsProfileName(this);
++	if (String::IsNullOrWhiteSpace(settingsPath))
++		return;
++
++	if (Settings::Serialize(this, settingsPath))
++		MessageBox::Show("Settings saved successfully to:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++	else
++		MessageBox::Show("Settings could not be saved. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
+ }
+ 
+ void MainForm::closeMapleStoryToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+@@ -374,6 +560,52 @@ void MainForm::GUITimer_Tick(Object^  sender, EventArgs^  e) {
+ 		lbPortalCount->Text = PointerFuncs::getPortalCount();
+ 		lbNPCCount->Text = PointerFuncs::getNPCCount();
+ 	}
++	else {
++		int loginStep = -1;
++		int loginScreen = -1;
++		String^ sessionText = "Disconnected / waiting";
++		if (HasMapleLoginUI()) {
++			sessionText = "Login screen";
++		}
++		else if (TryGetMapleLoginState(loginStep, loginScreen)) {
++			if (loginStep == 1 || loginStep == 5)
++				sessionText = "Selecting world / channel";
++			else if (loginStep == 2)
++				sessionText = "Selecting character";
++			else if (loginStep == 0)
++				sessionText = "Logging in...";
++			else
++				sessionText = "Login transition (state " + loginStep.ToString() + ")";
++		}
++
++		// Never leave stale character/map data visible after a disconnect.
++		lbMapName->Text = sessionText;
++		lbCharName->Text = "--";
++		lbLevel->Text = "--";
++		lbJob->Text = "--";
++		lbHP->Text = "--";
++		lbMP->Text = "--";
++		lbEXP->Text = "--";
++		lbMesos->Text = "--";
++		lbWorld->Text = "--";
++		lbChannel->Text = "--";
++		lbMapID->Text = "--";
++		lbWalls->Text = "--";
++		lbCharFoothold->Text = "--";
++		lbCharAnimation->Text = "--";
++		lbCharPos->Text = "--";
++		lbMousePos->Text = "--";
++		lbAttackCount->Text = "0";
++		lbBuffCount->Text = "0";
++		lbBreathCount->Text = "0";
++		lbPeopleCount->Text = "0";
++		lbMobCount->Text = "0";
++		lbItemCount->Text = "0";
++		lbPortalCount->Text = "0";
++		lbNPCCount->Text = "0";
++	}
++
++	ProcessAutoLogin();
+ }
+ #pragma endregion
+ 
+@@ -393,112 +625,461 @@ void MainForm::lbConsoleLog_KeyDown(System::Object^  sender, System::Windows::Fo
+ 
+ #pragma region Auto Login
+ 
+-//TODO: Get Real Mac Address
+-String^ GetMac(bool generateFake) {
+-	String^ macAddress = "";
++enum AutoLoginPhase {
++	AUTOLOGIN_IDLE = 0,
++	AUTOLOGIN_USERNAME = 10,
++	AUTOLOGIN_PASSWORD = 11,
++	AUTOLOGIN_CONNECT = 12,
++	AUTOLOGIN_WAIT_LOGIN = 13,
++	AUTOLOGIN_WORLD = 20,
++	AUTOLOGIN_CHANNEL = 21,
++	AUTOLOGIN_WAIT_CHANNEL = 22,
++	AUTOLOGIN_CHARACTER = 30,
++	AUTOLOGIN_PIC = 31,
++	AUTOLOGIN_WAIT_CHARACTER = 32
++};
+ 
+-	if(generateFake) {
+-		for(int i = 0; i < 12; i++) {
+-			if (i != 0 && i % 2 == 0)
+-				macAddress += "-";
+-			macAddress += IntToHex(rand() % 16);
+-		}
+-	}
++static void SetAutoLoginStatus(String^ status) {
++	if (String::IsNullOrWhiteSpace(status) || status == GlobalRefs::autoLoginLastStatus)
++		return;
++
++	GlobalRefs::autoLoginLastStatus = status;
++	Log::WriteLineToConsole("Auto Login: " + status);
++}
+ 
+-	return macAddress;
++static void ResetAutoLoginState(bool runImmediately) {
++	GlobalRefs::autoLoginPhase = AUTOLOGIN_IDLE;
++	GlobalRefs::autoLoginLastStep = -1;
++	GlobalRefs::autoLoginLastScreen = -1;
++	GlobalRefs::autoLoginAttempts = 0;
++	GlobalRefs::autoLoginNextAction = runImmediately ? DateTime::Now : DateTime::Now.AddSeconds(2);
+ }
+ 
+-//TODO: Get Real HWID (CLogin::GetLocalMacAddressWithHDDSerialNo())
+-String^ GetHWID(bool generateFake, String^ mac) {
+-	String^ hwid = "";
++static bool FocusMapleWindow() {
++	if (GlobalVars::mapleWindow == nullptr || !IsWindow(GlobalVars::mapleWindow))
++		GlobalVars::mapleWindow = GetMSWindowHandle();
++	if (GlobalVars::mapleWindow == nullptr || !IsWindow(GlobalVars::mapleWindow))
++		return false;
+ 
+-	if(generateFake) {
+-		mac = mac->Replace("-", "");
+-		hwid += mac;
+-		hwid += "_";
+-		for (int i = 0; i < 8; i++)
+-			hwid += IntToHex(rand() % 16);
++	if (IsIconic(GlobalVars::mapleWindow))
++		ShowWindow(GlobalVars::mapleWindow, SW_RESTORE);
++	SetForegroundWindow(GlobalVars::mapleWindow);
++	return true;
++}
++
++static void SendPhysicalKey(WORD virtualKey, bool keyUp) {
++	INPUT input;
++	ZeroMemory(&input, sizeof(INPUT));
++	input.type = INPUT_KEYBOARD;
++	input.ki.wVk = virtualKey;
++	input.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0;
++	SendInput(1, &input, sizeof(INPUT));
++}
++
++static void TapPhysicalKey(WORD virtualKey) {
++	SendPhysicalKey(virtualKey, false);
++	SendPhysicalKey(virtualKey, true);
++}
++
++static void TapPhysicalKeyRepeated(WORD virtualKey, int count) {
++	for (int i = 0; i < count; i++) {
++		TapPhysicalKey(virtualKey);
++		Sleep(12);
+ 	}
++}
++
++#pragma unmanaged
++static bool SetMapleLoginFieldNative(ULONG fieldOffset, const char* text) {
++	if (text == nullptr)
++		return false;
+ 
+-	return hwid; 
++	try {
++		// Refuse to call into an unexpected client build. The two vtables and
++		// SetText prologue below are exact values from the supplied BeiDou.exe.
++		if (*(ULONG*)CCtrlEditSetTextAddr != 0x0424448B)
++			return false;
++
++		ULONG uiLogin = *(ULONG*)UILoginBase;
++		if (uiLogin == 0 || *(ULONG*)uiLogin != CUILoginVTable)
++			return false;
++
++		ULONG edit = *(ULONG*)(uiLogin + fieldOffset);
++		if (edit == 0 || *(ULONG*)edit != CCtrlEditVTable)
++			return false;
++
++		typedef void(__thiscall *pfnCCtrlEdit__SetText)(PVOID, const char*);
++		static pfnCCtrlEdit__SetText CCtrlEdit__SetText =
++			reinterpret_cast<pfnCCtrlEdit__SetText>(CCtrlEditSetTextAddr);
++		CCtrlEdit__SetText((PVOID)edit, text);
++		return true;
++	}
++	catch (...) {
++		return false;
++	}
+ }
+ 
+-void SendLoginPacket(String^ username, String^ password) {
+-	String^ packet = "";
+-	writeBytes(packet, gcnew array<BYTE>{0x01, 0x00}); //Login OpCode
+-	writeString(packet, username); //Username
+-	writeString(packet, password); //Password
+-	writeBytes(packet, gcnew array<BYTE>{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); //Unknown bytes
+-	writeBytes(packet, gcnew array<BYTE>{0x00, 0x00, 0x00, 0x00}); //Account id? setting to 0 for now
+-	//rest of packet unused for now
+-	SendPacket(packet);
++static bool SubmitMapleLoginNative() {
++	try {
++		// CUILogin::OnButtonClicked(1000) is the actual Connect-button path.
++		// Validate both the function prologue and object vtable before calling
++		// it so a different v83 client build fails closed instead of crashing.
++		if (*(ULONG*)CUILoginOnButtonClickedAddr != 0xA9B668B8)
++			return false;
++
++		ULONG uiLogin = *(ULONG*)UILoginBase;
++		if (uiLogin == 0 || *(ULONG*)uiLogin != CUILoginVTable)
++			return false;
++
++		typedef void(__thiscall *pfnCUILogin__OnButtonClicked)(PVOID, int);
++		static pfnCUILogin__OnButtonClicked CUILogin__OnButtonClicked =
++			reinterpret_cast<pfnCUILogin__OnButtonClicked>(CUILoginOnButtonClickedAddr);
++		CUILogin__OnButtonClicked((PVOID)uiLogin, 1000);
++		return true;
++	}
++	catch (...) {
++		return false;
++	}
++}
++
++static bool SubmitMapleWorldChannelNative(int world, int channel) {
++	__try {
++		// CLogin::SendLoginPacket(world, channel) is the path called by the
++		// client's own channel selector. Validate its prologue and the server
++		// list first; the function itself returns zero even when it rejects an
++		// unavailable world/channel, so its return value cannot signal success.
++		if (*(ULONG*)cloginSendLoginPacketAddr != 0xA978E0B8)
++			return false;
++
++		ULONG login = *(ULONG*)LoginBase;
++		if (login == 0)
++			return false;
++
++		int step = *(int*)(login + OFS_LoginStep);
++		if (step != 1 && step != 5)
++			return false;
++
++		ULONG worlds = *(ULONG*)(login + OFS_LoginWorldList);
++		if (worlds == 0)
++			return false;
++
++		int worldCount = *(int*)(worlds - 4);
++		if (worldCount <= 0 || worldCount > 64 || world < 0 || channel < 0)
++			return false;
++
++		bool found = false;
++		for (int i = 0; i < worldCount; i++) {
++			ULONG worldEntry = worlds + (i * 0x20);
++			if (*(int*)worldEntry != world)
++				continue;
++
++			ULONG channels = *(ULONG*)(worldEntry + 0x1C);
++			if (channels == 0)
++				return false;
++
++			int channelCount = *(int*)(channels - 4);
++			if (channelCount <= 0 || channelCount > 64 || channel >= channelCount)
++				return false;
++
++			found = true;
++			break;
++		}
++		if (!found)
++			return false;
++
++		typedef int(__thiscall *pfnCLogin__SendLoginPacket)(PVOID, int, int);
++		reinterpret_cast<pfnCLogin__SendLoginPacket>(cloginSendLoginPacketAddr)(
++			(PVOID)login, world, channel);
++		return true;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
+ }
+ 
+-void SendCharListRequestPacket(int world, int channel) {
+-	String^ packet = "";
+-	writeBytes(packet, gcnew array<BYTE>{0x05, 0x00}); //Character List Request OpCode
+-	writeByte(packet, 0x02); //Unknown byte
+-	writeByte(packet, world); //World
+-	writeByte(packet, channel); //Channel
+-	writeBytes(packet, gcnew array<BYTE>{0x7F, 0x00, 0x00, 0x01}); //Unknown bytes
+-	SendPacket(packet);
++static bool SubmitMapleCharacterNative(int character) {
++	__try {
++		// SelectAvatar writes CLogin's selected-character index and refreshes
++		// the native highlight. Calling the avatar UI's own Enter handler then
++		// follows exactly the same path as pressing Start Game in the client.
++		if (*(ULONG*)CUIAvatarSelectAvatarAddr != 0x53EC8B55 ||
++			*(ULONG*)CUIAvatarOnKeyAddr != 0xA98D18B8)
++			return false;
++
++		ULONG uiAvatar = *(ULONG*)UIAvatarBase;
++		ULONG login = *(ULONG*)LoginBase;
++		if (uiAvatar == 0 || login == 0 || *(ULONG*)uiAvatar != CUIAvatarVTable)
++			return false;
++
++		if (*(int*)(login + OFS_LoginStep) != 2 || character < 0 || character >= 15)
++			return false;
++
++		typedef void(__thiscall *pfnCUIAvatar__SelectAvatar)(PVOID, int);
++		typedef void(__thiscall *pfnCUIAvatar__OnKey)(PVOID, int, int);
++
++		reinterpret_cast<pfnCUIAvatar__SelectAvatar>(CUIAvatarSelectAvatarAddr)(
++			(PVOID)uiAvatar, character);
++		if (*(int*)(login + OFS_LoginSelectedCharacter) != character)
++			return false;
++
++		// OnKey belongs to the secondary interface at CUIAvatar + 4.
++		reinterpret_cast<pfnCUIAvatar__OnKey>(CUIAvatarOnKeyAddr)(
++			(PVOID)(uiAvatar + 4), VK_RETURN, 0);
++		return true;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
+ }
++#pragma managed
+ 
+-void SendSelectCharPacket(int character, bool existsPIC) {
+-	String^ packet = "";
+-	String^ macAddress = GetMac(true);
++static bool SetMapleLoginField(String^ text, ULONG fieldOffset) {
++	if (String::IsNullOrEmpty(text))
++		return false;
+ 
+-	if(existsPIC) {
+-		String^ PIC = MainForm::TheInstance->tbAutoLoginPIC->Text;
++	IntPtr ansiText = Runtime::InteropServices::Marshal::StringToHGlobalAnsi(text);
++	bool result = false;
++	try {
++		result = SetMapleLoginFieldNative(fieldOffset, (const char*)ansiText.ToPointer());
++	}
++	finally {
++		Runtime::InteropServices::Marshal::FreeHGlobal(ansiText);
++	}
++	return result;
++}
+ 
+-		writeBytes(packet, gcnew array<BYTE>{0x1E, 0x00}); //Character Select (With PIC) OpCode
+-		writeString(packet, PIC); //PIC
+-		writeInt(packet, character); //Character Number (starts with 1)
+-		writeString(packet, macAddress); //Mac Address
+-		writeString(packet, GetHWID(true, macAddress)); //HWID
+-		SendPacket(packet);
++static bool TypeCredentialText(String^ text) {
++	if (String::IsNullOrEmpty(text))
++		return false;
++
++	for each (wchar_t character in text) {
++		SHORT key = VkKeyScanW(character);
++		if (key == -1) {
++			// WM_CHAR is a useful fallback for a character that the active
++			// keyboard layout cannot represent directly.
++			PostMessage(GlobalVars::mapleWindow, WM_CHAR, character, 1);
++			continue;
++		}
++
++		BYTE virtualKey = LOBYTE(key);
++		BYTE modifiers = HIBYTE(key);
++		if (modifiers & 1) SendPhysicalKey(VK_SHIFT, false);
++		if (modifiers & 2) SendPhysicalKey(VK_CONTROL, false);
++		if (modifiers & 4) SendPhysicalKey(VK_MENU, false);
++
++		TapPhysicalKey(virtualKey);
++
++		if (modifiers & 4) SendPhysicalKey(VK_MENU, true);
++		if (modifiers & 2) SendPhysicalKey(VK_CONTROL, true);
++		if (modifiers & 1) SendPhysicalKey(VK_SHIFT, true);
++		Sleep(18);
+ 	}
+-	else {
+-		writeBytes(packet, gcnew array<BYTE>{0x13, 0x00}); //Character Select (Without PIC) OpCode
+-		writeInt(packet, character); //Character Number (starts with 1)
+-		writeString(packet, macAddress); //Mac Address
+-		writeString(packet, GetHWID(true, macAddress)); //HWID
+-		SendPacket(packet);
++
++	return true;
++}
++
++static int GetComboIndex(ComboBox^ combo) {
++	if (combo == nullptr)
++		return 0;
++	if (combo->SelectedIndex >= 0)
++		return combo->SelectedIndex;
++
++	String^ current = combo->Text == nullptr ? String::Empty : combo->Text->Trim();
++	int numeric = 0;
++	if (Int32::TryParse(current, numeric) && numeric > 0)
++		return numeric - 1;
++
++	for (int i = 0; i < combo->Items->Count; i++) {
++		if (String::Equals(combo->Items[i]->ToString()->Trim(), current, StringComparison::OrdinalIgnoreCase))
++			return i;
+ 	}
++	return 0;
++}
++
++static void SelectGridItemByKeyboard(int index, int columns) {
++	if (!FocusMapleWindow())
++		return;
++
++	index = Math::Max(0, index);
++	columns = Math::Max(1, columns);
++
++	// Drive selection to the top-left first. This works with both the stock
++	// v83 grid and single-world private-server screens.
++	TapPhysicalKeyRepeated(VK_LEFT, 6);
++	TapPhysicalKeyRepeated(VK_UP, 6);
++	TapPhysicalKeyRepeated(VK_RIGHT, index % columns);
++	TapPhysicalKeyRepeated(VK_DOWN, index / columns);
++	TapPhysicalKey(VK_RETURN);
+ }
+ 
+-//Only works for HeavenMS as of now, maybe on other private servers that doesn't check the validity of the fake hwid/mac address in the packets
+ void AutoLogin() {
+-	if (*(BYTE*)(*(ULONG*)LoginBase + OFS_LoginScreen) == 255) {
+-		Log::WriteLineToConsole("AutoLogin: Logging in...");
+-		String^ usernameStr = MainForm::TheInstance->tbAutoLoginUsername->Text;
+-		String^ passwordStr = MainForm::TheInstance->tbAutoLoginPassword->Text;
+-		SendLoginPacket(usernameStr, passwordStr);
+-		Sleep(2000);
++	ResetAutoLoginState(true);
++}
+ 
+-		int world = MainForm::TheInstance->comboAutoLoginWorld->SelectedIndex;
+-		int channel = MainForm::TheInstance->comboAutoLoginChannel->SelectedIndex; 
+-		SendCharListRequestPacket(world, channel);
+-		Sleep(2000);
++void ProcessAutoLogin() {
++	MainForm^ form = MainForm::TheInstance;
++	if (form == nullptr || !form->cbAutoLogin->Checked)
++		return;
+ 
+-		int character = MainForm::TheInstance->comboAutoLoginCharacter->SelectedIndex + 1;
+-		bool existsPIC = MainForm::TheInstance->cbAutoLoginPic->Checked;
+-		SendSelectCharPacket(character, existsPIC);
+-		Log::WriteLineToConsole("AutoLogin: Login Completed");
++	if (HelperFuncs::IsInGame()) {
++		if (GlobalRefs::autoLoginPhase != AUTOLOGIN_IDLE || GlobalRefs::autoLoginAttempts > 0)
++			SetAutoLoginStatus("character connected");
++		ResetAutoLoginState(false);
++		return;
+ 	}
+-}
+ 
+-void SetLoginHooks(bool enable) {
+-	Hooks::CLogin__OnRecommendWorldMessage_Hook(true);
++	String^ username = form->tbAutoLoginUsername->Text == nullptr ? String::Empty : form->tbAutoLoginUsername->Text->Trim();
++	String^ password = form->tbAutoLoginPassword->Text == nullptr ? String::Empty : form->tbAutoLoginPassword->Text;
++	if (String::IsNullOrEmpty(username) || String::IsNullOrEmpty(password)) {
++		SetAutoLoginStatus("waiting for username and password");
++		return;
++	}
+ 
+-	if (!enable) {
+-		MessageBox::Show("False!");
+-		Hooks::CLogin__OnRecommendWorldMessage_Hook(false);
++	int loginStep = -1;
++	int loginScreen = -1;
++	if (!TryGetMapleLoginState(loginStep, loginScreen)) {
++		SetAutoLoginStatus("waiting for the client login state");
++		return;
+ 	}
+-	else {
+-		MessageBox::Show("true!");
+-		Hooks::CLogin__OnRecommendWorldMessage_Hook(true); //Crashes, wrong params maybe
++	bool loginUIActive = HasMapleLoginUI();
++
++	bool stateChanged = loginStep != GlobalRefs::autoLoginLastStep || loginScreen != GlobalRefs::autoLoginLastScreen;
++	if (stateChanged) {
++		GlobalRefs::autoLoginLastStep = loginStep;
++		GlobalRefs::autoLoginLastScreen = loginScreen;
++
++		if (loginUIActive) {
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_USERNAME;
++			// Preserve a retry delay after a rejected attempt so an incorrect
++			// password cannot hammer the private server continuously.
++			if (GlobalRefs::autoLoginAttempts > 0)
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(GlobalRefs::autoLoginAttempts % 3 == 0 ? 60 : 8);
++			else
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(300);
++			SetAutoLoginStatus("login screen detected");
++		}
++		else if (loginStep == 1 || loginStep == 5) {
++			if (GlobalRefs::autoLoginPhase < AUTOLOGIN_WORLD || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHANNEL)
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(800);
++			SetAutoLoginStatus("world/channel screen detected");
++		}
++		else if (loginStep == 2) {
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(800);
++			SetAutoLoginStatus("character screen detected");
++		}
++	}
++
++	if (DateTime::Now < GlobalRefs::autoLoginNextAction)
++		return;
+ 
++	if (loginUIActive) {
++		switch (GlobalRefs::autoLoginPhase) {
++			case AUTOLOGIN_IDLE:
++			case AUTOLOGIN_USERNAME:
++				if (!SetMapleLoginField(username, OFS_UILoginUsernameEdit)) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++					SetAutoLoginStatus("waiting for the internal username control");
++					return;
++				}
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_PASSWORD;
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(150);
++				SetAutoLoginStatus("username written to the internal control");
++				return;
++
++			case AUTOLOGIN_PASSWORD:
++				if (!SetMapleLoginField(password, OFS_UILoginPasswordEdit)) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++					SetAutoLoginStatus("waiting for the internal password control");
++					return;
++				}
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_CONNECT;
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(150);
++				SetAutoLoginStatus("password written to the internal control");
++				return;
++
++			case AUTOLOGIN_CONNECT:
++				if (!SubmitMapleLoginNative()) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++					SetAutoLoginStatus("waiting for the internal Connect control");
++					return;
++				}
++				GlobalRefs::autoLoginAttempts++;
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_LOGIN;
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(8);
++				SetAutoLoginStatus("credentials submitted (attempt " + GlobalRefs::autoLoginAttempts.ToString() + ")");
++				return;
++
++			case AUTOLOGIN_WAIT_LOGIN:
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_USERNAME;
++				if (GlobalRefs::autoLoginAttempts % 3 == 0) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(60);
++					SetAutoLoginStatus("login did not advance; cooling down for 60 seconds");
++				}
++				else {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(8);
++					SetAutoLoginStatus("login did not advance; retry scheduled");
++				}
++				return;
++		}
++	}
++
++	if (!loginUIActive && (loginStep == 1 || loginStep == 5)) {
++		if (GlobalRefs::autoLoginPhase < AUTOLOGIN_WORLD || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHANNEL)
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
++
++		if (GlobalRefs::autoLoginPhase == AUTOLOGIN_WORLD || GlobalRefs::autoLoginPhase == AUTOLOGIN_CHANNEL) {
++			int world = GetComboIndex(form->comboAutoLoginWorld);
++			int channel = GetComboIndex(form->comboAutoLoginChannel);
++			if (!SubmitMapleWorldChannelNative(world, channel)) {
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++				SetAutoLoginStatus("waiting for the native world/channel list");
++				return;
++			}
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_CHANNEL;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(5);
++			SetAutoLoginStatus("world/channel request submitted through CLogin");
++		}
++		else {
++			// If the server kept us on the same step, repeat the world/channel
++			// sequence after a modest delay instead of hammering Enter.
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(10);
++			SetAutoLoginStatus("world/channel selection did not advance; retry scheduled");
++		}
++		return;
++	}
++
++	if (!loginUIActive && loginStep == 2) {
++		if (GlobalRefs::autoLoginPhase < AUTOLOGIN_CHARACTER || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHARACTER)
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHARACTER;
++
++		if (GlobalRefs::autoLoginPhase == AUTOLOGIN_CHARACTER) {
++			int character = GetComboIndex(form->comboAutoLoginCharacter);
++			if (!SubmitMapleCharacterNative(character)) {
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++				SetAutoLoginStatus("waiting for the native character selector");
++				return;
++			}
++			GlobalRefs::autoLoginPhase = form->cbAutoLoginPic->Checked ? AUTOLOGIN_PIC : AUTOLOGIN_WAIT_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(form->cbAutoLoginPic->Checked ? 2 : 6);
++			SetAutoLoginStatus("character selected and Start Game submitted");
++		}
++		else if (GlobalRefs::autoLoginPhase == AUTOLOGIN_PIC) {
++			String^ pic = form->tbAutoLoginPIC->Text == nullptr ? String::Empty : form->tbAutoLoginPIC->Text->Trim();
++			if (!String::IsNullOrEmpty(pic)) {
++				TypeCredentialText(pic);
++				TapPhysicalKey(VK_RETURN);
++				SetAutoLoginStatus("PIC submitted");
++			}
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(6);
++		}
++		else {
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(10);
++			SetAutoLoginStatus("character selection did not advance; retry scheduled");
++		}
+ 	}
+ }
+ 
+@@ -512,13 +1093,14 @@ void MainForm::cbAutoLoginSkipLogo_CheckedChanged(System::Object^  sender, Syste
+ }
+ 
+ void MainForm::cbAutoLogin_CheckedChanged(System::Object^  sender, System::EventArgs^  e) {
+-	if(this->cbAutoLogin->Checked)
+-		SetLoginHooks(true);
+-	else
+-		SetLoginHooks(false);
+-	
+-	//if (this->cbAutoLogin->Checked)
+-		//AutoLogin();
++	if (this->cbAutoLogin->Checked) {
++		ResetAutoLoginState(true);
++		SetAutoLoginStatus("enabled");
++	}
++	else {
++		ResetAutoLoginState(false);
++		SetAutoLoginStatus("disabled");
++	}
+ }
+ #pragma endregion
+ 
+@@ -534,6 +1116,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
+ static int keyCollection[] = { 0x10, 0x11, 0x12, 0x20, 0x2D, 0x2E, 0x24, 0x23, 0x21, 0x22, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51,
+ 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39 };
+ 
++static int GetKeyCodeFromName(String^ keyName) {
++	if (String::IsNullOrWhiteSpace(keyName))
++		return 0;
++
++	String^ key = keyName->Trim()->ToUpperInvariant();
++	if (key->Length == 1) {
++		wchar_t value = key[0];
++		if ((value >= L'A' && value <= L'Z') || (value >= L'0' && value <= L'9'))
++			return (int)value;
++	}
++
++	if (key == "SHIFT") return VK_SHIFT;
++	if (key == "CONTROL") return VK_CONTROL;
++	if (key == "ALT") return VK_MENU;
++	if (key == "SPACE") return VK_SPACE;
++	if (key == "INSERT") return VK_INSERT;
++	if (key == "DELETE") return VK_DELETE;
++	if (key == "HOME") return VK_HOME;
++	if (key == "END") return VK_END;
++	if (key == "PAGE UP") return VK_PRIOR;
++	if (key == "PAGE DOWN") return VK_NEXT;
++	return 0;
++}
++
++static Macro^ GetOrCreateBuffMacro(ListViewItem^ item) {
++	if (item == nullptr)
++		return nullptr;
++
++	Macro^ macro = dynamic_cast<Macro^>(item->Tag);
++	if (macro != nullptr)
++		return macro;
++
++	if (item->SubItems->Count < 3)
++		return nullptr;
++
++	int keyCode = GetKeyCodeFromName(item->SubItems[1]->Text);
++	UInt32 intervalSeconds = 0;
++	if (keyCode == 0 || !UInt32::TryParse(item->SubItems[2]->Text, intervalSeconds) || intervalSeconds == 0 || intervalSeconds > 2147483)
++		return nullptr;
++
++	macro = gcnew Macro(keyCode, (int)(intervalSeconds * 1000), MacroType::BUFFMACRO);
++	item->Tag = macro;
++	return macro;
++}
++
+ //Check if keypress is valid
+ static bool isKeyValid(Object^ sender, Windows::Forms::KeyPressEventArgs^ e, bool isSigned) {
+ 	bool result = true;
+@@ -704,51 +1331,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
+ 
+ #pragma region Auto Buffs
+ void MainForm::bBuffAdd_Click(Object^  sender, EventArgs^  e) {
+-	if(String::IsNullOrWhiteSpace(tbBuffInterval->Text)) {
+-		MessageBox::Show("Error: Buff Interval textbox cannot be empty");
++	UInt32 intervalSeconds = 0;
++	if (!UInt32::TryParse(tbBuffInterval->Text, intervalSeconds) || intervalSeconds == 0 || intervalSeconds > 2147483) {
++		MessageBox::Show("Error: Buff interval must be between 1 and 2147483 seconds");
++		return;
++	}
++	if (comboBuffKey->SelectedIndex < 0) {
++		MessageBox::Show("Error: Select a valid buff key");
+ 		return;
+ 	}
+ 	ListViewItem^ lvi = gcnew ListViewItem(gcnew array<String^>{tbBuffName->Text, comboBuffKey->Text, tbBuffInterval->Text});
+-	lvi->Tag = gcnew Macro(keyCollection[comboBuffKey->SelectedIndex], Convert::ToUInt32(tbBuffInterval->Text)*1000, MacroType::BUFFMACRO);
+-	lvi->Checked = true;
++	lvi->Tag = gcnew Macro(keyCollection[comboBuffKey->SelectedIndex], (int)(intervalSeconds * 1000), MacroType::BUFFMACRO);
+ 	lvBuff->Items->Add(lvi);
++	lvi->Checked = true;
+ }
+ 
+ void MainForm::bBuffEnableAll_Click(Object^  sender, EventArgs^  e) {
+ 	for each (ListViewItem^ lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(true);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(true);
+ 		lvi->Checked = true;
+ 	}
+ }
+ 
+ void MainForm::bBuffDisableAll_Click(Object^  sender, EventArgs^  e) {
+ 	for each (ListViewItem ^lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 		lvi->Checked = false;
+ 	}
+ }
+ 
+ void MainForm::bBuffRemove_Click(Object^  sender, EventArgs^  e) {
+ 	for each(ListViewItem^ lvi in lvBuff->SelectedItems) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 		lvBuff->Items->Remove(lvi);
+ 	}
+ }
+ 
+ void MainForm::bBuffClear_Click(Object^  sender, EventArgs^  e) {
+ 	for each(ListViewItem^ lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
+-		lvBuff->Items->Remove(lvi);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 	}
++	lvBuff->Items->Clear();
+ }
+ 
+ void MainForm::lvBuff_ItemChecked(Object^  sender, Windows::Forms::ItemCheckedEventArgs^  e) {
+-	Macro^ macro = (Macro^)e->Item->Tag;
+-	macro->Toggle(e->Item->Checked);
++	Macro^ macro = GetOrCreateBuffMacro(e->Item);
++	if (macro != nullptr)
++		macro->Toggle(e->Item->Checked);
+ }
+ 
+ void MainForm::tbBuffInterval_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
+@@ -941,6 +1578,103 @@ void MainForm::cbSellAll_CheckedChanged(System::Object^  sender, System::EventAr
+ #pragma endregion
+ 
+ #pragma region Hacks I Tab
++static const UCHAR sharpEyesOnBytes[] = {
++	0xD6, 0x3C, 0xD1, 0x66, 0x9A, 0x89, 0x36, 0xD3, 0x00, 0x70, 0x1A, 0xB2,
++	0x6F, 0xA5, 0xD8, 0xAF, 0xD0, 0xB9, 0x7F, 0x2D, 0x7B, 0x64, 0x2B, 0x3E,
++	0x65, 0xC0, 0xF8, 0xD9, 0x11, 0x71, 0xC9, 0x5E, 0x94, 0x1A, 0xE4, 0xA1
++};
++
++static const UCHAR sharpEyesOffBytes[] = {
++	0x85, 0x3B, 0x33, 0x52, 0xDC, 0x99, 0x91, 0x2A, 0x38, 0x90, 0xD6, 0x71,
++	0xC6, 0xC2, 0x2B, 0x82, 0x16, 0x5E, 0x11, 0x34, 0xAC, 0x8F, 0xD5, 0x8D
++};
++
++// The verified 1000 ZtlSecure<long> representation was recovered from the
++// supplied v83 trainer. The other selectable values reuse its first key and
++// recompute the second key, so value == key1 ^ RotateLeft(key2, 5).
++static const UCHAR dualAttack100Bytes[] = {
++	0xBF, 0xFF, 0x89, 0x98, 0xFE, 0x4F, 0xC4, 0xDC, 0x5F, 0x70, 0xD5, 0x4D
++};
++
++static const UCHAR dualAttack500Bytes[] = {
++	0xBF, 0xFF, 0x89, 0x98, 0xF2, 0x4F, 0xC4, 0x5C, 0x5F, 0x70, 0xD5, 0x4D
++};
++
++static const UCHAR dualAttack1000Bytes[] = {
++	0xBF, 0xFF, 0x89, 0x98, 0xE2, 0x4F, 0xC4, 0xBC, 0x5F, 0x70, 0xD5, 0x4D
++};
++
++static const UCHAR dualAttack5000Bytes[] = {
++	0xBF, 0xFF, 0x89, 0x98, 0x61, 0x4F, 0xC4, 0xBC, 0x5F, 0x70, 0xD5, 0x4D
++};
++
++static const UCHAR dualAttackOffBytes[] = {
++	0x26, 0xB7, 0xDE, 0xC6, 0xB9, 0xF5, 0x36, 0x36, 0xF2, 0x8F, 0x1A, 0x92
++};
++
++static bool WritePatchBytes(ULONG address, const UCHAR* bytes, ULONG length) {
++	__try {
++		MakePageWritable(address, length);
++		for (ULONG i = 0; i < length; ++i)
++			*(UCHAR*)(address + i) = bytes[i];
++		return true;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
++void MainForm::cbSharpEyes_CheckedChanged(Object^ sender, EventArgs^ e) {
++	const UCHAR* bytes = this->cbSharpEyes->Checked ? sharpEyesOnBytes : sharpEyesOffBytes;
++	ULONG length = this->cbSharpEyes->Checked ? sizeof(sharpEyesOnBytes) : sizeof(sharpEyesOffBytes);
++	if (WritePatchBytes(sharpEyesPatchAddr, bytes, length))
++		Log::WriteLineToConsole(this->cbSharpEyes->Checked ? "Sharp Eyes enabled." : "Sharp Eyes disabled.");
++	else {
++		Log::WriteLineToConsole("Sharp Eyes patch failed: incompatible v83 client memory.");
++		if (this->cbSharpEyes->Checked)
++			this->cbSharpEyes->Checked = false;
++	}
++}
++
++static const UCHAR* GetDualAttackBytes(int selectedIndex) {
++	switch (selectedIndex) {
++	case 0: return dualAttack100Bytes;
++	case 1: return dualAttack500Bytes;
++	case 3: return dualAttack5000Bytes;
++	case 2:
++	default: return dualAttack1000Bytes;
++	}
++}
++
++void MainForm::ApplyDualAttackSetting() {
++	const bool enabled = this->cbDualAttack->Checked;
++	const UCHAR* bytes = enabled ? GetDualAttackBytes(this->comboDualAttackValue->SelectedIndex) : dualAttackOffBytes;
++	ULONG length = sizeof(dualAttackOffBytes);
++	bool physicalWritten = WritePatchBytes(dualAttackPhysicalAddr, bytes, length);
++	bool magicWritten = WritePatchBytes(dualAttackMagicAddr, bytes, length);
++
++	if (physicalWritten && magicWritten) {
++		if (enabled)
++			Log::WriteLineToConsole("Dual Attack enabled: " + this->comboDualAttackValue->SelectedItem->ToString() + ".");
++		else
++			Log::WriteLineToConsole("Dual Attack disabled.");
++	}
++	else {
++		Log::WriteLineToConsole("Dual Attack patch failed: incompatible v83 client memory.");
++		if (this->cbDualAttack->Checked)
++			this->cbDualAttack->Checked = false;
++	}
++}
++
++void MainForm::cbDualAttack_CheckedChanged(Object^ sender, EventArgs^ e) {
++	this->ApplyDualAttackSetting();
++}
++
++void MainForm::comboDualAttackValue_SelectedIndexChanged(Object^ sender, EventArgs^ e) {
++	if (this->cbDualAttack->Checked)
++		this->ApplyDualAttackSetting();
++}
++
+ //Full Godmode (CUserLocal::SetDamaged())
+ void MainForm::cbFullGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
+ 	if (this->cbFullGodmode->Checked)
+@@ -968,25 +1702,38 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
+ }
+ 
+ void ClickTeleport() {
++	bool wasLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+ 	while (GlobalRefs::bClickTeleport) {
+-		if (ReadPointer(InputBase, OFS_MouseAnimation) == 12)
+-			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbClickTeleport->Text));
++		bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
++		int mouseX = 0, mouseY = 0;
++		if (isLeftButtonDown && !wasLeftButtonDown && HelperFuncs::IsInGame() &&
++			TryGetMouseWorldPosition(mouseX, mouseY) && isPosValid(mouseX, mouseY))
++			Teleport(mouseX, mouseY);
++		wasLeftButtonDown = isLeftButtonDown;
++		Sleep(GlobalRefs::clickTeleportDelay);
+ 	}
+ 	ExitThread(0);
+ }
+ 
+ void MouseTeleport() {
+ 	while (GlobalRefs::bMouseTeleport) {
+-		if (ReadPointer(InputBase, OFS_MouseAnimation) == 00)
+-			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbMouseTeleport->Text));
++		int mouseX = 0, mouseY = 0;
++		if (HelperFuncs::IsInGame() && TryGetMouseWorldPosition(mouseX, mouseY) && isPosValid(mouseX, mouseY))
++			Teleport(mouseX, mouseY);
++		Sleep(GlobalRefs::mouseTeleportDelay);
+ 	}
+ 	ExitThread(0);
+ }
+ 
+ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+ 	if (this->cbClickTeleport->Checked) {
++		UInt32 delay = 0;
++		if (!UInt32::TryParse(tbClickTeleport->Text, delay) || delay < 10) {
++			MessageBox::Show("Error: Click Teleport interval must be at least 10 ms");
++			this->cbClickTeleport->Checked = false;
++			return;
++		}
++		GlobalRefs::clickTeleportDelay = delay;
+ 		GlobalRefs::bClickTeleport = true;
+ 		NewThread(ClickTeleport);
+ 	}
+@@ -996,6 +1743,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+  
+ void MainForm::cbMouseTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+ 	if (this->cbMouseTeleport->Checked) {
++		UInt32 delay = 0;
++		if (!UInt32::TryParse(tbMouseTeleport->Text, delay) || delay < 10) {
++			MessageBox::Show("Error: Mouse Teleport interval must be at least 10 ms");
++			this->cbMouseTeleport->Checked = false;
++			return;
++		}
++		GlobalRefs::mouseTeleportDelay = delay;
+ 		GlobalRefs::bMouseTeleport = true;
+ 		NewThread(MouseTeleport);
+ 	}
+@@ -2114,10 +2868,97 @@ void MainForm::tbMobFilterID_KeyPress(Object^  sender, Windows::Forms::KeyPressE
+ #pragma endregion
+ 
+ #pragma region Packets Tab
++static String^ PacketBytesToHex(const std::vector<BYTE>& bytes) {
++	Text::StringBuilder^ result = gcnew Text::StringBuilder(static_cast<int>(bytes.size() * 3));
++	for (size_t i = 0; i < bytes.size(); ++i) {
++		if (i > 0)
++			result->Append(' ');
++		result->AppendFormat("{0:X2}", static_cast<UInt32>(bytes[i]));
++	}
++	return result->ToString();
++}
++
++static bool TryReadPacketHeader(String^ packetText, USHORT% header) {
++	header = 0;
++	if (String::IsNullOrWhiteSpace(packetText))
++		return false;
++
++	String^ compact = packetText->Replace(" ", String::Empty)
++		->Replace("\r", String::Empty)
++		->Replace("\n", String::Empty)
++		->Replace("\t", String::Empty);
++	if (compact->Length < 4)
++		return false;
++
++	Byte low = 0, high = 0;
++	if (!Byte::TryParse(compact->Substring(0, 2), Globalization::NumberStyles::HexNumber,
++		Globalization::CultureInfo::InvariantCulture, low))
++		return false;
++	if (!Byte::TryParse(compact->Substring(2, 2), Globalization::NumberStyles::HexNumber,
++		Globalization::CultureInfo::InvariantCulture, high))
++		return false;
++
++	header = static_cast<USHORT>(low | (high << 8));
++	return true;
++}
++
++static String^ GetSelectedPacketText(Windows::Forms::TreeView^ tree, Windows::Forms::TextBox^ editor) {
++	if (tree->SelectedNode != nullptr && tree->SelectedNode->Tag != nullptr)
++		return safe_cast<String^>(tree->SelectedNode->Tag);
++	return editor->Text;
++}
++
++static void AddPacketLogNodes(Windows::Forms::TreeView^ tree, const std::vector<PacketMonitor::PacketLogEntry>& entries) {
++	if (entries.empty())
++		return;
++
++	tree->BeginUpdate();
++	for (std::vector<PacketMonitor::PacketLogEntry>::const_iterator it = entries.begin(); it != entries.end(); ++it) {
++		const PacketMonitor::PacketLogEntry& entry = *it;
++		String^ raw = PacketBytesToHex(entry.bytes);
++		DateTime when = DateTime::FromFileTimeUtc(static_cast<long long>(entry.timestamp)).ToLocalTime();
++		String^ headerText = entry.header == 0xFFFF
++			? "-- --"
++			: (static_cast<BYTE>(entry.header & 0xFF)).ToString("X2") + " " +
++			  (static_cast<BYTE>((entry.header >> 8) & 0xFF)).ToString("X2");
++		String^ truncated = entry.bytes.size() < entry.originalSize
++			? " (captured " + Convert::ToString(static_cast<UInt64>(entry.bytes.size())) + ")"
++			: String::Empty;
++		String^ title = "[" + when.ToString("HH:mm:ss.fff") + "] " + headerText +
++			" | " + Convert::ToString(static_cast<UInt32>(entry.originalSize)) + " bytes" + truncated;
++
++		Windows::Forms::TreeNode^ root = gcnew Windows::Forms::TreeNode(title);
++		root->Tag = raw;
++		const size_t bytesPerLine = 24;
++		for (size_t offset = 0; offset < entry.bytes.size(); offset += bytesPerLine) {
++			Text::StringBuilder^ line = gcnew Text::StringBuilder();
++			line->AppendFormat("{0:X4}", static_cast<UInt32>(offset));
++			line->Append(": ");
++			const size_t end = std::min(offset + bytesPerLine, entry.bytes.size());
++			for (size_t index = offset; index < end; ++index) {
++				if (index > offset)
++					line->Append(' ');
++				line->AppendFormat("{0:X2}", static_cast<UInt32>(entry.bytes[index]));
++			}
++			Windows::Forms::TreeNode^ child = gcnew Windows::Forms::TreeNode(line->ToString());
++			child->Tag = raw;
++			root->Nodes->Add(child);
++		}
++		tree->Nodes->Add(root);
++	}
++
++	while (tree->Nodes->Count > 500)
++		tree->Nodes->RemoveAt(0);
++	if (tree->Nodes->Count > 0)
++		tree->Nodes[tree->Nodes->Count - 1]->EnsureVisible();
++	tree->EndUpdate();
++}
++
+ #pragma region Send Packets
+ void MainForm::bSendPacket_Click(Object^  sender, EventArgs^  e) {
+-	SendPacket(tbSendPacket->Text);
+-	//SendPacket(gcnew String("28 00 ** ** ** 00"));
++	Log::WriteLineToConsole(SendPacket(tbSendPacket->Text)
++		? "Packet editor: outgoing packet submitted."
++		: "Packet editor: outgoing packet failed.");
+ }
+ 
+ void MainForm::tbSendSpamDelay_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
+@@ -2125,23 +2966,125 @@ void MainForm::tbSendSpamDelay_KeyPress(Object^  sender, Windows::Forms::KeyPres
+ }
+ 
+ void MainForm::bSendLog_Click(System::Object^  sender, System::EventArgs^  e) {
+-	if(bSendLog->Text->Equals("Enable Log")) {
+-		bSendLog->Text = "Disable Log";
+-		GlobalRefs::bSendPacketLog = true;
+-		this->tPacketLog->Enabled = true;
+-		Jump(cOutPacketAddr, Assembly::SendPacketLogHook, 0);
++	const bool enable = !PacketMonitor::IsLoggingEnabled(true);
++	if (!PacketMonitor::SetLoggingEnabled(true, enable)) {
++		MessageBox::Show("Could not install the v83 outgoing packet hook.", "Packet Log",
++			MessageBoxButtons::OK, MessageBoxIcon::Error);
++		return;
+ 	}
+-	else {
+-		bSendLog->Text = "Enable Log";
+-		GlobalRefs::bSendPacketLog = false;
+-		WriteMemory(cOutPacketAddr, 5, 0xB8, 0x6C, 0x12, 0xA8, 0x00);
++	GlobalRefs::bSendPacketLog = enable;
++	bSendLog->Text = enable ? "Disable Log" : "Enable Log";
++	tPacketLog->Enabled = enable || GlobalRefs::bRecvPacketLog || cbSendSpam->Checked;
++}
++
++void MainForm::bSendClear_Click(System::Object^ sender, System::EventArgs^ e) {
++	PacketMonitor::Clear(true);
++	tvSendPackets->Nodes->Clear();
++}
++
++void MainForm::tvSendPackets_AfterSelect(System::Object^ sender, Windows::Forms::TreeViewEventArgs^ e) {
++	if (e->Node != nullptr && e->Node->Tag != nullptr)
++		tbSendPacket->Text = safe_cast<String^>(e->Node->Tag);
++}
++
++void MainForm::bSendBlock_Click(System::Object^ sender, System::EventArgs^ e) {
++	USHORT header = 0;
++	if (!TryReadPacketHeader(GetSelectedPacketText(tvSendPackets, tbSendPacket), header)) {
++		MessageBox::Show("Select a logged packet or enter at least two hex bytes first.", "Block Header");
++		return;
++	}
++	if (!PacketMonitor::SetHeaderBlocked(true, header, true)) {
++		MessageBox::Show("Could not install the outgoing packet hook.", "Block Header");
++		return;
++	}
++	String^ key = header.ToString("X4");
++	if (!lvSendBlock->Items->ContainsKey(key)) {
++		String^ display = (static_cast<BYTE>(header & 0xFF)).ToString("X2") + " " +
++			(static_cast<BYTE>((header >> 8) & 0xFF)).ToString("X2");
++		Windows::Forms::ListViewItem^ item = gcnew Windows::Forms::ListViewItem(display);
++		item->Name = key;
++		lvSendBlock->Items->Add(item);
++	}
++}
++
++void MainForm::bSendRemove_Click(System::Object^ sender, System::EventArgs^ e) {
++	while (lvSendBlock->SelectedItems->Count > 0) {
++		Windows::Forms::ListViewItem^ item = lvSendBlock->SelectedItems[0];
++		USHORT header = 0;
++		if (TryReadPacketHeader(item->Text, header))
++			PacketMonitor::SetHeaderBlocked(true, header, false);
++		lvSendBlock->Items->Remove(item);
++	}
++}
++
++void MainForm::cbSendSpam_CheckedChanged(System::Object^ sender, System::EventArgs^ e) {
++	if (cbSendSpam->Checked && String::IsNullOrWhiteSpace(tbSendPacket->Text)) {
++		MessageBox::Show("Enter or select an outgoing packet before enabling Spam.", "Packet Spam");
++		cbSendSpam->Checked = false;
++		return;
+ 	}
++	GlobalRefs::packetSpamNextAction = DateTime::Now;
++	tPacketLog->Enabled = cbSendSpam->Checked || GlobalRefs::bSendPacketLog || GlobalRefs::bRecvPacketLog;
+ }
+ #pragma endregion
+ 
+ #pragma region Receive Packets
+ void MainForm::bRecvPacket_Click(Object^  sender, EventArgs^  e) {
+-	RecvPacket(tbRecvPacket->Text);
++	Log::WriteLineToConsole(RecvPacket(tbRecvPacket->Text)
++		? "Packet editor: incoming packet submitted to the client."
++		: "Packet editor: incoming packet failed.");
++}
++
++void MainForm::bRecvLog_Click(System::Object^ sender, System::EventArgs^ e) {
++	const bool enable = !PacketMonitor::IsLoggingEnabled(false);
++	if (!PacketMonitor::SetLoggingEnabled(false, enable)) {
++		MessageBox::Show("Could not install the v83 incoming packet hook.", "Packet Log",
++			MessageBoxButtons::OK, MessageBoxIcon::Error);
++		return;
++	}
++	GlobalRefs::bRecvPacketLog = enable;
++	bRecvLog->Text = enable ? "Disable Log" : "Enable Log";
++	tPacketLog->Enabled = enable || GlobalRefs::bSendPacketLog || cbSendSpam->Checked;
++}
++
++void MainForm::bRecvClear_Click(System::Object^ sender, System::EventArgs^ e) {
++	PacketMonitor::Clear(false);
++	tvRecvPackets->Nodes->Clear();
++}
++
++void MainForm::tvRecvPackets_AfterSelect(System::Object^ sender, Windows::Forms::TreeViewEventArgs^ e) {
++	if (e->Node != nullptr && e->Node->Tag != nullptr)
++		tbRecvPacket->Text = safe_cast<String^>(e->Node->Tag);
++}
++
++void MainForm::bRecvBlock_Click(System::Object^ sender, System::EventArgs^ e) {
++	USHORT header = 0;
++	if (!TryReadPacketHeader(GetSelectedPacketText(tvRecvPackets, tbRecvPacket), header)) {
++		MessageBox::Show("Select a logged packet or enter at least two hex bytes first.", "Block Header");
++		return;
++	}
++	if (!PacketMonitor::SetHeaderBlocked(false, header, true)) {
++		MessageBox::Show("Could not install the incoming packet hook.", "Block Header");
++		return;
++	}
++	String^ key = header.ToString("X4");
++	if (!lvRecvBlock->Items->ContainsKey(key)) {
++		String^ display = (static_cast<BYTE>(header & 0xFF)).ToString("X2") + " " +
++			(static_cast<BYTE>((header >> 8) & 0xFF)).ToString("X2");
++		Windows::Forms::ListViewItem^ item = gcnew Windows::Forms::ListViewItem(display);
++		item->Name = key;
++		lvRecvBlock->Items->Add(item);
++	}
++}
++
++void MainForm::bRecvRemove_Click(System::Object^ sender, System::EventArgs^ e) {
++	while (lvRecvBlock->SelectedItems->Count > 0) {
++		Windows::Forms::ListViewItem^ item = lvRecvBlock->SelectedItems[0];
++		USHORT header = 0;
++		if (TryReadPacketHeader(item->Text, header))
++			PacketMonitor::SetHeaderBlocked(false, header, false);
++		lvRecvBlock->Items->Remove(item);
++	}
+ }
+ #pragma endregion
+ 
+@@ -2308,57 +3251,27 @@ System::Void MainForm::cbAP_CheckedChanged(System::Object^ sender, System::Event
+ #pragma endregion
+ 
+ void MainForm::tPacketLog_Tick(System::Object^  sender, System::EventArgs^  e) {
+-	if (!GlobalRefs::bSendPacketLog && !GlobalRefs::bRecvPacketLog)
+-		this->tPacketLog->Enabled = false;
+-
+-	//std::vector<COutPacket*> *sentPacketQueue = Assembly::sendPacketLogQueue;
+-	if(GlobalRefs::bSendPacketLog && !Assembly::sendPacketQueue->empty()) {
+-		COutPacket *packet = (COutPacket*)Assembly::sendPacketQueue->front();
+-		
+-		String^ packetHeader = "";
+-		writeUnsignedShort(packetHeader, *packet->Header);
+-		Log::WriteLineToConsole(packetHeader);
+-		
+-		Assembly::sendPacketQueue->pop();
++	std::vector<PacketMonitor::PacketLogEntry> sendEntries;
++	std::vector<PacketMonitor::PacketLogEntry> recvEntries;
++	PacketMonitor::Drain(true, sendEntries);
++	PacketMonitor::Drain(false, recvEntries);
++	AddPacketLogNodes(tvSendPackets, sendEntries);
++	AddPacketLogNodes(tvRecvPackets, recvEntries);
++
++	if (cbSendSpam->Checked && DateTime::Now >= GlobalRefs::packetSpamNextAction) {
++		int delay = 100;
++		if (!Int32::TryParse(tbSendSpamDelay->Text, delay))
++			delay = 100;
++		delay = Math::Max(25, Math::Min(60000, delay));
++		if (!SendPacket(tbSendPacket->Text)) {
++			cbSendSpam->Checked = false;
++			Log::WriteLineToConsole("Packet spam stopped because the packet was rejected.");
++		}
++		GlobalRefs::packetSpamNextAction = DateTime::Now.AddMilliseconds(delay);
+ 	}
+ 
+-	/*if(!GlobalRefs::bSendPacketLog) {
+-		for (std::vector<COutPacket>::const_iterator i = Assembly::sendPacketLogQueue->begin(); i != Assembly::sendPacketLogQueue->end(); ++i) {
+-			COutPacket packet = *i;
+-
+-			String^ packetHeader = "";
+-			writeUnsignedShort(packetHeader, *packet.Header);
+-			Log::WriteLineToConsole(packetHeader);
+-
+-			/*String^ packetData = "";
+-			BYTE* packetBytes = packet->Data;
+-			int packetSize = packet->Size - 2;
+-			for (int i = 0; i < packetSize; i++)
+-				writeByte(packetData, packetBytes[i]);#1#
+-
+-
+-			/*Windows::Forms::TreeNode^ headerNode = gcnew Windows::Forms::TreeNode(packetHeader);
+-			headerNode->Name = packetHeader;
+-
+-			Windows::Forms::TreeNode^ packetNode = gcnew Windows::Forms::TreeNode(packetData);
+-			packetNode->Name = packetData;
+-
+-			Timelapse::MainForm::TheInstance->tvSendPackets->Nodes->Add(headerNode);#1#
+-
+-			/*if(Timelapse::MainForm::TheInstance->tvSendPackets->Nodes->ContainsKey(packetHeader)) {
+-				//Header exists in tree
+-			}
+-			else {
+-				Windows::Forms::TreeNode^ headerNode = gcnew Windows::Forms::TreeNode(packetHeader);
+-				headerNode->Name = packetHeader;
+-				//headerNode->Nodes->Add(packetNode);
+-				Timelapse::MainForm::TheInstance->tvSendPackets->BeginUpdate();
+-				Timelapse::MainForm::TheInstance->tvSendPackets->Nodes->Add(headerNode);
+-				Timelapse::MainForm::TheInstance->tvSendPackets->EndUpdate();
+-			}#1#
+-		}
+-		Assembly::sendPacketLogQueue->clear();
+-	}*/
++	if (!GlobalRefs::bSendPacketLog && !GlobalRefs::bRecvPacketLog && !cbSendSpam->Checked)
++		tPacketLog->Enabled = false;
+ }
+ #pragma endregion
+ 
+@@ -2927,4 +3840,4 @@ auto StringPool__GetString = (pfnStringPool__GetString)0x0079E993;	//0x00406455;
+ typedef char**(__stdcall *pfnCItemInfo__GetMapString)(PVOID, PVOID, char*, UINT, const char*);
+ auto CItemInfo__GetMapString = (pfnCItemInfo__GetMapString)0x005CF792;*/
+ 
+-#pragma endregion
+\ No newline at end of file
++#pragma endregion
+diff --git a/Timelapse/MainForm.h b/Timelapse/MainForm.h
+index 7e68e46e36c6c9bb4783c4aef68619b33c5f883d..d9ca23152b7171130547e6999aa71e945aea19ec 100644
+--- a/Timelapse/MainForm.h
++++ b/Timelapse/MainForm.h
+@@ -238,7 +238,7 @@ private:
+ private:
+ 
+ 	public: System::Windows::Forms::CheckBox^  cbAutoLoginSkipLogo;
+-	private: System::Windows::Forms::CheckBox^  cbAutoLogin;
++	public: System::Windows::Forms::CheckBox^  cbAutoLogin;
+ 	private: System::Windows::Forms::TabPage^  tabPage18;
+ 	private: System::Windows::Forms::TabPage^  tabPage19;
+ 	private: System::Windows::Forms::Panel^  panel6;
+@@ -421,6 +421,9 @@ private:
+ 	private: System::Windows::Forms::CheckBox^  cbAttackDelay;
+ 	private: System::Windows::Forms::CheckBox^  cbBlinkGodmode;
+ 	private: System::Windows::Forms::GroupBox^  groupBox6;
++	private: System::Windows::Forms::CheckBox^  cbSharpEyes;
++	private: System::Windows::Forms::CheckBox^  cbDualAttack;
++	private: System::Windows::Forms::ComboBox^  comboDualAttackValue;
+ 	private: System::Windows::Forms::Label^  lbCharFoothold;
+ 	private: System::Windows::Forms::Label^  label96;
+ 	private: System::Windows::Forms::Label^  lbCharAnimation;
+@@ -651,6 +654,9 @@ public:
+ 			this->cbMP = (gcnew System::Windows::Forms::CheckBox());
+ 			this->tabPage5 = (gcnew System::Windows::Forms::TabPage());
+ 			this->groupBox6 = (gcnew System::Windows::Forms::GroupBox());
++			this->comboDualAttackValue = (gcnew System::Windows::Forms::ComboBox());
++			this->cbDualAttack = (gcnew System::Windows::Forms::CheckBox());
++			this->cbSharpEyes = (gcnew System::Windows::Forms::CheckBox());
+ 			this->cbNoWalkingFriction = (gcnew System::Windows::Forms::CheckBox());
+ 			this->groupBox5 = (gcnew System::Windows::Forms::GroupBox());
+ 			this->cbNoBlueBoxes = (gcnew System::Windows::Forms::CheckBox());
+@@ -2504,6 +2510,7 @@ public:
+ 			this->lvBuff->TabIndex = 0;
+ 			this->lvBuff->UseCompatibleStateImageBehavior = false;
+ 			this->lvBuff->View = System::Windows::Forms::View::Details;
++			this->lvBuff->ItemChecked += gcnew System::Windows::Forms::ItemCheckedEventHandler(this, &MainForm::lvBuff_ItemChecked);
+ 			// 
+ 			// lvBuffHeaderName
+ 			// 
+@@ -2518,7 +2525,7 @@ public:
+ 			// lvBuffHeaderInterval
+ 			// 
+ 			this->lvBuffHeaderInterval->DisplayIndex = 1;
+-			this->lvBuffHeaderInterval->Text = L"Interval [ms]";
++			this->lvBuffHeaderInterval->Text = L"Interval [s]";
+ 			this->lvBuffHeaderInterval->Width = 80;
+ 			// 
+ 			// tabPage12
+@@ -3273,6 +3280,9 @@ public:
+ 			// 
+ 			// groupBox6
+ 			// 
++			this->groupBox6->Controls->Add(this->comboDualAttackValue);
++			this->groupBox6->Controls->Add(this->cbDualAttack);
++			this->groupBox6->Controls->Add(this->cbSharpEyes);
+ 			this->groupBox6->Controls->Add(this->cbNoWalkingFriction);
+ 			this->groupBox6->ForeColor = System::Drawing::Color::WhiteSmoke;
+ 			this->groupBox6->Location = System::Drawing::Point(249, 175);
+@@ -3280,7 +3290,49 @@ public:
+ 			this->groupBox6->Size = System::Drawing::Size(135, 133);
+ 			this->groupBox6->TabIndex = 28;
+ 			this->groupBox6->TabStop = false;
+-			this->groupBox6->Text = L"Physics Hacks";
++			this->groupBox6->Text = L"Physics / Skill Hacks";
++			//
++			// comboDualAttackValue
++			//
++			this->comboDualAttackValue->DropDownStyle = System::Windows::Forms::ComboBoxStyle::DropDownList;
++			this->comboDualAttackValue->FormattingEnabled = true;
++			this->comboDualAttackValue->Items->AddRange(gcnew cli::array< System::Object^  >(4) {
++				L"100", L"500", L"1000", L"5000"
++			});
++			this->comboDualAttackValue->Location = System::Drawing::Point(10, 70);
++			this->comboDualAttackValue->Name = L"comboDualAttackValue";
++			this->comboDualAttackValue->Size = System::Drawing::Size(105, 21);
++			this->comboDualAttackValue->TabIndex = 14;
++			this->comboDualAttackValue->SelectedIndex = 2;
++			this->comboDualAttackValue->SelectedIndexChanged += gcnew System::EventHandler(this, &MainForm::comboDualAttackValue_SelectedIndexChanged);
++			//
++			// cbDualAttack
++			//
++			this->cbDualAttack->AutoSize = true;
++			this->cbDualAttack->FlatAppearance->BorderColor = System::Drawing::Color::Maroon;
++			this->cbDualAttack->FlatStyle = System::Windows::Forms::FlatStyle::Flat;
++			this->cbDualAttack->ForeColor = System::Drawing::Color::White;
++			this->cbDualAttack->Location = System::Drawing::Point(10, 52);
++			this->cbDualAttack->Name = L"cbDualAttack";
++			this->cbDualAttack->Size = System::Drawing::Size(82, 17);
++			this->cbDualAttack->TabIndex = 13;
++			this->cbDualAttack->Text = L"Dual Attack";
++			this->cbDualAttack->UseVisualStyleBackColor = false;
++			this->cbDualAttack->CheckedChanged += gcnew System::EventHandler(this, &MainForm::cbDualAttack_CheckedChanged);
++			//
++			// cbSharpEyes
++			//
++			this->cbSharpEyes->AutoSize = true;
++			this->cbSharpEyes->FlatAppearance->BorderColor = System::Drawing::Color::Maroon;
++			this->cbSharpEyes->FlatStyle = System::Windows::Forms::FlatStyle::Flat;
++			this->cbSharpEyes->ForeColor = System::Drawing::Color::White;
++			this->cbSharpEyes->Location = System::Drawing::Point(10, 34);
++			this->cbSharpEyes->Name = L"cbSharpEyes";
++			this->cbSharpEyes->Size = System::Drawing::Size(78, 17);
++			this->cbSharpEyes->TabIndex = 12;
++			this->cbSharpEyes->Text = L"Sharp Eyes";
++			this->cbSharpEyes->UseVisualStyleBackColor = false;
++			this->cbSharpEyes->CheckedChanged += gcnew System::EventHandler(this, &MainForm::cbSharpEyes_CheckedChanged);
+ 			// 
+ 			// cbNoWalkingFriction
+ 			// 
+@@ -5605,6 +5657,7 @@ public:
+ 			this->tvSendPackets->Name = L"tvSendPackets";
+ 			this->tvSendPackets->Size = System::Drawing::Size(304, 288);
+ 			this->tvSendPackets->TabIndex = 43;
++			this->tvSendPackets->AfterSelect += gcnew System::Windows::Forms::TreeViewEventHandler(this, &MainForm::tvSendPackets_AfterSelect);
+ 			// 
+ 			// label81
+ 			// 
+@@ -5642,6 +5695,7 @@ public:
+ 			this->cbSendSpam->TabIndex = 19;
+ 			this->cbSendSpam->Text = L"Spam";
+ 			this->cbSendSpam->UseVisualStyleBackColor = false;
++			this->cbSendSpam->CheckedChanged += gcnew System::EventHandler(this, &MainForm::cbSendSpam_CheckedChanged);
+ 			// 
+ 			// bSendRemove
+ 			// 
+@@ -5653,6 +5707,7 @@ public:
+ 			this->bSendRemove->TabIndex = 18;
+ 			this->bSendRemove->Text = L"Remove";
+ 			this->bSendRemove->UseVisualStyleBackColor = true;
++			this->bSendRemove->Click += gcnew System::EventHandler(this, &MainForm::bSendRemove_Click);
+ 			// 
+ 			// lvSendBlock
+ 			// 
+@@ -5689,8 +5744,9 @@ public:
+ 			this->bSendBlock->Name = L"bSendBlock";
+ 			this->bSendBlock->Size = System::Drawing::Size(46, 25);
+ 			this->bSendBlock->TabIndex = 15;
+-			this->bSendBlock->Text = L"Block Header";
++			this->bSendBlock->Text = L"Block";
+ 			this->bSendBlock->UseVisualStyleBackColor = true;
++			this->bSendBlock->Click += gcnew System::EventHandler(this, &MainForm::bSendBlock_Click);
+ 			// 
+ 			// bSendLog
+ 			// 
+@@ -5714,6 +5770,7 @@ public:
+ 			this->bSendClear->TabIndex = 13;
+ 			this->bSendClear->Text = L"Clear";
+ 			this->bSendClear->UseVisualStyleBackColor = true;
++			this->bSendClear->Click += gcnew System::EventHandler(this, &MainForm::bSendClear_Click);
+ 			// 
+ 			// bSendPacket
+ 			// 
+@@ -5756,6 +5813,7 @@ public:
+ 			this->tvRecvPackets->Name = L"tvRecvPackets";
+ 			this->tvRecvPackets->Size = System::Drawing::Size(304, 288);
+ 			this->tvRecvPackets->TabIndex = 44;
++			this->tvRecvPackets->AfterSelect += gcnew System::Windows::Forms::TreeViewEventHandler(this, &MainForm::tvRecvPackets_AfterSelect);
+ 			// 
+ 			// bRecvRemove
+ 			// 
+@@ -5767,6 +5825,7 @@ public:
+ 			this->bRecvRemove->TabIndex = 26;
+ 			this->bRecvRemove->Text = L"Remove";
+ 			this->bRecvRemove->UseVisualStyleBackColor = true;
++			this->bRecvRemove->Click += gcnew System::EventHandler(this, &MainForm::bRecvRemove_Click);
+ 			// 
+ 			// lvRecvBlock
+ 			// 
+@@ -5803,8 +5862,9 @@ public:
+ 			this->bRecvBlock->Name = L"bRecvBlock";
+ 			this->bRecvBlock->Size = System::Drawing::Size(66, 25);
+ 			this->bRecvBlock->TabIndex = 23;
+-			this->bRecvBlock->Text = L"Block Header";
++			this->bRecvBlock->Text = L"Block";
+ 			this->bRecvBlock->UseVisualStyleBackColor = true;
++			this->bRecvBlock->Click += gcnew System::EventHandler(this, &MainForm::bRecvBlock_Click);
+ 			// 
+ 			// bRecvLog
+ 			// 
+@@ -5816,6 +5876,7 @@ public:
+ 			this->bRecvLog->TabIndex = 22;
+ 			this->bRecvLog->Text = L"Enable Log";
+ 			this->bRecvLog->UseVisualStyleBackColor = true;
++			this->bRecvLog->Click += gcnew System::EventHandler(this, &MainForm::bRecvLog_Click);
+ 			// 
+ 			// bRecvClear
+ 			// 
+@@ -5827,6 +5888,7 @@ public:
+ 			this->bRecvClear->TabIndex = 21;
+ 			this->bRecvClear->Text = L"Clear";
+ 			this->bRecvClear->UseVisualStyleBackColor = true;
++			this->bRecvClear->Click += gcnew System::EventHandler(this, &MainForm::bRecvClear_Click);
+ 			// 
+ 			// bRecvPacket
+ 			// 
+@@ -6463,7 +6525,7 @@ public:
+ 			// 
+ 			// tPacketLog
+ 			// 
+-			this->tPacketLog->Interval = 3000;
++			this->tPacketLog->Interval = 100;
+ 			this->tPacketLog->Tick += gcnew System::EventHandler(this, &MainForm::tPacketLog_Tick);
+ 			// 
+ 			// MainForm
+@@ -6719,6 +6781,16 @@ public:
+ 	private: System::Void cbKami_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void cbKamiLoot_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void bSendLog_Click(System::Object^  sender, System::EventArgs^  e);
++	private: System::Void bRecvLog_Click(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void bSendClear_Click(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void bRecvClear_Click(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void bSendBlock_Click(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void bRecvBlock_Click(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void bSendRemove_Click(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void bRecvRemove_Click(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void cbSendSpam_CheckedChanged(System::Object^ sender, System::EventArgs^ e);
++	private: System::Void tvSendPackets_AfterSelect(System::Object^ sender, System::Windows::Forms::TreeViewEventArgs^ e);
++	private: System::Void tvRecvPackets_AfterSelect(System::Object^ sender, System::Windows::Forms::TreeViewEventArgs^ e);
+ 	private: System::Void bSendMount_Click(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void bSendSuicide_Click(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void bSendDrop10_Click(System::Object^  sender, System::EventArgs^  e);
+@@ -6751,6 +6823,10 @@ public:
+ 	private: System::Void bMapRush_Click(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void lbMapRusherStatus_TextChanged(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void cbNoWalkingFriction_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
++	private: System::Void cbSharpEyes_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
++	private: System::Void ApplyDualAttackSetting();
++	private: System::Void cbDualAttack_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
++	private: System::Void comboDualAttackValue_SelectedIndexChanged(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void cbVacForceRight_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void cbVacJumpRight_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
+ 	private: System::Void cbVacLeft_CheckedChanged(System::Object^  sender, System::EventArgs^  e);
+@@ -6789,4 +6865,4 @@ public:
+ private: System::Void HPPotDelay_TextChanged(System::Object^ sender, System::EventArgs^ e) {
+ }
+ };
+-};
+\ No newline at end of file
++};
+diff --git a/Timelapse/MapleFunctions.h b/Timelapse/MapleFunctions.h
+index f7584c17e2afe678962e559102223f3eef6a89cd..fc97f5686d9791e1f76b73aa5a4bd64761dffb10 100644
+--- a/Timelapse/MapleFunctions.h
++++ b/Timelapse/MapleFunctions.h
+@@ -30,6 +30,179 @@ static ULONG GetMSThreadID() {
+ 	return GetWindowThreadProcessId(GlobalVars::mapleWindow, nullptr);
+ }
+ 
++#pragma unmanaged
++// CLogin survives several screen transitions and is a better session-state
++// source than CUIMiniMap.  The latter commonly keeps the last MapID after a
++// disconnect, which made Timelapse believe the character was still in game.
++static bool TryGetMapleLoginState(int& loginStep, int& loginScreen) {
++	loginStep = -1;
++	loginScreen = -1;
++
++	__try {
++		ULONG login = *(ULONG*)LoginBase;
++		if (login == 0)
++			return false;
++
++		// This member is a DWORD in the supplied client. CLogin::SetStep stores
++		// all six values (0..5); reading one byte and rejecting 3..5 caused the
++		// world selector to be reported as "Disconnected / waiting".
++		loginStep = *(int*)(login + OFS_LoginStep);
++		loginScreen = *(BYTE*)(login + OFS_LoginScreen);
++
++		return loginStep >= 0 && loginStep <= 5;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		loginStep = -1;
++		loginScreen = -1;
++		return false;
++	}
++}
++
++// The CUILogin singleton is the authoritative login-page signal. Offset
++// +0x174 also carries values 0, 1, 2 and 255 in normal server replies, so it
++// must not be used as a screen enum.
++static bool HasMapleLoginUI() {
++	__try {
++		ULONG uiLogin = *(ULONG*)UILoginBase;
++		return uiLogin != 0 && *(ULONG*)uiLogin == CUILoginVTable;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
++static bool HasMapleLocalPlayer() {
++	__try {
++		return *(ULONG*)UserLocalBase != 0;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
++// Resolve the cursor to MapleStory world coordinates.  Some v83 clients
++// (including the BeiDou-based client) store these as floats on a different
++// CInputSystem chain than the original Timelapse offsets.
++static bool GetCursorInMapleClient(POINT& clientPoint, int& clientWidth, int& clientHeight) {
++	HWND mapleWindow = GlobalVars::mapleWindow;
++	if (mapleWindow == nullptr)
++		mapleWindow = GetMSWindowHandle();
++	if (mapleWindow == nullptr || !IsWindow(mapleWindow))
++		return false;
++
++	POINT screenPoint;
++	RECT clientRect;
++	if (!GetCursorPos(&screenPoint) || !ScreenToClient(mapleWindow, &screenPoint) || !GetClientRect(mapleWindow, &clientRect))
++		return false;
++
++	clientWidth = clientRect.right - clientRect.left;
++	clientHeight = clientRect.bottom - clientRect.top;
++	if (clientWidth <= 0 || clientHeight <= 0 || screenPoint.x < 0 || screenPoint.y < 0 ||
++		screenPoint.x >= clientWidth || screenPoint.y >= clientHeight)
++		return false;
++
++	clientPoint = screenPoint;
++	return true;
++}
++
++static bool IsMouseWorldPositionPlausible(int x, int y) {
++	if (x < -1000000 || x > 1000000 || y < -1000000 || y > 1000000)
++		return false;
++
++	int left = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_LeftWall);
++	int right = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_RightWall);
++	int top = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_TopWall);
++	int bottom = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_BottomWall);
++	if (right > left && bottom > top)
++		return x >= left - 4096 && x <= right + 4096 && y >= top - 4096 && y <= bottom + 4096;
++
++	return true;
++}
++
++static bool TryGetBeiDouMouseWorldPosition(int& x, int& y) {
++	__try {
++		ULONG inputSystem = *(ULONG*)InputBase;
++		if (inputSystem == 0) return false;
++		ULONG mouseContext = *(ULONG*)(inputSystem + 0x97C);
++		if (mouseContext == 0) return false;
++		ULONG mouseNode = *(ULONG*)(mouseContext + 0x8);
++		if (mouseNode == 0) return false;
++		ULONG worldPoint = *(ULONG*)(mouseNode + 0x78);
++		if (worldPoint == 0) return false;
++
++		float worldX = *(float*)(worldPoint);
++		float worldY = *(float*)(worldPoint + 4);
++		if (worldX != worldX || worldY != worldY || worldX < -1000000.0f || worldX > 1000000.0f ||
++			worldY < -1000000.0f || worldY > 1000000.0f)
++			return false;
++
++		x = (int)(worldX >= 0.0f ? worldX + 0.5f : worldX - 0.5f);
++		y = (int)(worldY >= 0.0f ? worldY + 0.5f : worldY - 0.5f);
++		return IsMouseWorldPositionPlausible(x, y);
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
++static bool TryGetLegacyMouseWorldPosition(int& x, int& y) {
++	x = (int)ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX);
++	y = (int)ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY);
++	return IsMouseWorldPositionPlausible(x, y);
++}
++
++// Last-resort conversion for clients that expose neither known memory chain.
++// It maps the Windows cursor through the camera area using the character and
++// map bounds, so Mouse Teleport still follows the real cursor.
++static bool TryGetApproximateMouseWorldPosition(const POINT& clientPoint, int clientWidth, int clientHeight, int& x, int& y) {
++	int left = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_LeftWall);
++	int right = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_RightWall);
++	int top = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_TopWall);
++	int bottom = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_BottomWall);
++	int charX = ReadPointerSignedInt(UserLocalBase, OFS_CharX);
++	int charY = ReadPointerSignedInt(UserLocalBase, OFS_CharY);
++	if (right <= left || bottom <= top)
++		return false;
++
++	int mapWidth = right - left;
++	int mapHeight = bottom - top;
++	int cameraLeft = charX - (clientWidth / 2);
++	int cameraTop = charY - (clientHeight / 2);
++
++	if (mapWidth > clientWidth) {
++		if (cameraLeft < left) cameraLeft = left;
++		if (cameraLeft > right - clientWidth) cameraLeft = right - clientWidth;
++	}
++	else {
++		cameraLeft = left - ((clientWidth - mapWidth) / 2);
++	}
++
++	if (mapHeight > clientHeight) {
++		if (cameraTop < top) cameraTop = top;
++		if (cameraTop > bottom - clientHeight) cameraTop = bottom - clientHeight;
++	}
++	else {
++		cameraTop = top - ((clientHeight - mapHeight) / 2);
++	}
++
++	x = cameraLeft + clientPoint.x;
++	y = cameraTop + clientPoint.y;
++	return IsMouseWorldPositionPlausible(x, y);
++}
++
++static bool TryGetMouseWorldPosition(int& x, int& y) {
++	POINT clientPoint;
++	int clientWidth = 0, clientHeight = 0;
++	if (!GetCursorInMapleClient(clientPoint, clientWidth, clientHeight))
++		return false;
++
++	if (TryGetBeiDouMouseWorldPosition(x, y))
++		return true;
++	if (TryGetLegacyMouseWorldPosition(x, y))
++		return true;
++	return TryGetApproximateMouseWorldPosition(clientPoint, clientWidth, clientHeight, x, y);
++}
++
+ #pragma managed
+ //Get MS ProcessID
+ static String^ GetMSProcID() {
+@@ -239,17 +412,22 @@ namespace PointerFuncs {
+ 
+ 	//Retrieve Mouse Position
+ 	static String^ getMousePos() {
+-		return "(" + ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX).ToString() + ", " + ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY).ToString() + ")";
++		int x = 0, y = 0;
++		if (!TryGetMouseWorldPosition(x, y))
++			return "(Outside game)";
++		return "(" + Convert::ToString(x) + ", " + Convert::ToString(y) + ")";
+ 	}
+ 
+ 	//Retrieve Mouse X Position
+ 	static String^ getMousePosX() {
+-		return ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX).ToString();
++		int x = 0, y = 0;
++		return TryGetMouseWorldPosition(x, y) ? Convert::ToString(x) : "N/A";
+ 	}
+ 
+ 	//Retrieve Mouse Y Position
+ 	static String^ getMousePosY() {
+-		return ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY).ToString();
++		int x = 0, y = 0;
++		return TryGetMouseWorldPosition(x, y) ? Convert::ToString(y) : "N/A";
+ 	}
+ 
+ 	//Retrieve Char Animation
+@@ -320,12 +498,18 @@ namespace HelperFuncs {
+ 
+ 	static bool IsInGame()
+ 	{
+-		const int mapID = Convert::ToInt32(PointerFuncs::getMapID());
+-
+-		if (!mapID == 0) //&& !PointerFuncs::getCharName()->Equals("CharName")
+-			return true;
++		if (!HasMapleLocalPlayer())
++			return false;
++
++		int loginStep = -1;
++		int loginScreen = -1;
++		if (TryGetMapleLoginState(loginStep, loginScreen)) {
++			if (loginScreen == 255 || loginScreen == 1 || loginStep == 1 || loginStep == 2)
++				return false;
++		}
+ 
+-		return false;
++		const int mapID = Convert::ToInt32(PointerFuncs::getMapID());
++		return mapID != 0;
+ 	}
+ 
+ 	static bool ValidToAttack()
+diff --git a/Timelapse/Packet.cpp b/Timelapse/Packet.cpp
+index 6803e7cf94351812efcb68569dde3bdc90ac9be8..56cd487dd2484cb2bab613eedab4e2a3998dcef2 100644
+--- a/Timelapse/Packet.cpp
++++ b/Timelapse/Packet.cpp
+@@ -1,28 +1,282 @@
+ #include "Packet.h"
+ #include "Structs.h"
+-#include "GeneralFunctions.h"
+ #include "Log.h"
++#include "detours.h"
++#include <algorithm>
++#include <deque>
++#include <set>
+ 
+-// TODO: rewrite in c++ WinSock Style
+-// Hooking client may not be available however hooking windows sockets api will be
++#pragma comment(lib, "detours.lib")
+ 
+-// Addresses
+-ULONG clientSocketAddr = 0x00BE7914;
+-ULONG COutPacketAddr = 0x0049637B;
+-ULONG CInPacketAddr = 0x004965F1;
+-// Hooks
+-PVOID* ClientSocket = reinterpret_cast<PVOID*>(clientSocketAddr);
+-typedef void(__thiscall *PacketSend)(PVOID clientSocket, COutPacket* packet); //Send packet from client to server
+-PacketSend Send = reinterpret_cast<PacketSend>(COutPacketAddr);
+-typedef void(__thiscall *PacketRecv)(PVOID clientSocket, CInPacket* packet); //Receive packet from client to server
+-PacketRecv Recv = reinterpret_cast<PacketRecv>(CInPacketAddr);
++using namespace System;
++
++// v83 CClientSocket packet entry points.
++static const ULONG CLIENT_SOCKET_ADDR = 0x00BE7914;
++static const ULONG COUT_PACKET_ADDR = 0x0049637B;
++static const ULONG CIN_PACKET_ADDR = 0x004965F1;
++
++PVOID* ClientSocket = reinterpret_cast<PVOID*>(CLIENT_SOCKET_ADDR);
++typedef void(__thiscall *PacketSend)(PVOID clientSocket, COutPacket* packet);
++typedef void(__thiscall *PacketRecv)(PVOID clientSocket, CInPacket* packet);
++static PacketSend Send = reinterpret_cast<PacketSend>(COUT_PACKET_ADDR);
++static PacketRecv Recv = reinterpret_cast<PacketRecv>(CIN_PACKET_ADDR);
++
++#pragma managed(push, off)
++namespace {
++	const size_t MAX_CAPTURE_BYTES = 8192;
++	const size_t MAX_QUEUED_PACKETS = 2048;
++
++	INIT_ONCE g_packetMonitorInit = INIT_ONCE_STATIC_INIT;
++	CRITICAL_SECTION g_packetMonitorLock;
++	std::deque<PacketMonitor::PacketLogEntry> g_sendEntries;
++	std::deque<PacketMonitor::PacketLogEntry> g_recvEntries;
++	std::set<USHORT> g_sendBlocked;
++	std::set<USHORT> g_recvBlocked;
++	volatile LONG g_sendLogging = FALSE;
++	volatile LONG g_recvLogging = FALSE;
++	bool g_sendHookInstalled = false;
++	bool g_recvHookInstalled = false;
++
++	PacketSend g_sendTarget = reinterpret_cast<PacketSend>(COUT_PACKET_ADDR);
++	PacketRecv g_recvTarget = reinterpret_cast<PacketRecv>(CIN_PACKET_ADDR);
++
++	BOOL CALLBACK InitializePacketMonitorOnce(PINIT_ONCE, PVOID, PVOID*) {
++		InitializeCriticalSection(&g_packetMonitorLock);
++		return TRUE;
++	}
++
++	void EnsurePacketMonitorInitialized() {
++		InitOnceExecuteOnce(&g_packetMonitorInit, InitializePacketMonitorOnce, nullptr, nullptr);
++	}
++
++	ULONGLONG CurrentFileTime() {
++		FILETIME ft = {};
++		GetSystemTimeAsFileTime(&ft);
++		ULARGE_INTEGER value = {};
++		value.LowPart = ft.dwLowDateTime;
++		value.HighPart = ft.dwHighDateTime;
++		return value.QuadPart;
++	}
++
++	bool CopyReadableBytes(const BYTE* source, UINT byteCount, std::vector<BYTE>& output) {
++		if (source == nullptr || byteCount == 0)
++			return false;
++
++		const SIZE_T captureSize = std::min<SIZE_T>(byteCount, MAX_CAPTURE_BYTES);
++		output.resize(captureSize);
++		SIZE_T bytesRead = 0;
++		if (!ReadProcessMemory(GetCurrentProcess(), source, output.data(), captureSize, &bytesRead) || bytesRead == 0) {
++			output.clear();
++			return false;
++		}
++
++		output.resize(bytesRead);
++		return true;
++	}
++
++	bool SnapshotOutPacket(COutPacket* packet, PacketMonitor::PacketLogEntry& entry) {
++		if (packet == nullptr || packet->Data == nullptr || packet->Size == 0)
++			return false;
++
++		entry.outgoing = true;
++		entry.timestamp = CurrentFileTime();
++		entry.originalSize = packet->Size;
++		entry.offset = packet->Offset;
++		if (!CopyReadableBytes(packet->Data, packet->Size, entry.bytes))
++			return false;
++
++		entry.header = entry.bytes.size() >= 2
++			? static_cast<USHORT>(entry.bytes[0] | (entry.bytes[1] << 8))
++			: 0xFFFF;
++		return true;
++	}
++
++	bool SnapshotInPacket(CInPacket* packet, PacketMonitor::PacketLogEntry& entry) {
++		if (packet == nullptr || packet->lpvData == nullptr || packet->Size == 0)
++			return false;
++
++		// A real v83 CInPacket allocation has a four-byte allocator/header
++		// prefix and starts with uOffset == 4. Packets injected by the editor
++		// are raw buffers with uOffset == 0, so support both layouts.
++		const UINT prefix = packet->uOffset >= 4 && packet->Size >= 4 ? 4 : 0;
++		UINT payloadSize = static_cast<UINT>(packet->Size) - prefix;
++		if (prefix == 4 && packet->usDataLen > 0 && packet->usDataLen <= payloadSize)
++			payloadSize = packet->usDataLen;
++
++		entry.outgoing = false;
++		entry.timestamp = CurrentFileTime();
++		entry.originalSize = payloadSize;
++		entry.offset = packet->uOffset >= prefix ? packet->uOffset - prefix : packet->uOffset;
++		const BYTE* payload = reinterpret_cast<const BYTE*>(packet->lpvData) + prefix;
++		if (!CopyReadableBytes(payload, payloadSize, entry.bytes))
++			return false;
++
++		entry.header = entry.bytes.size() >= 2
++			? static_cast<USHORT>(entry.bytes[0] | (entry.bytes[1] << 8))
++			: 0xFFFF;
++		return true;
++	}
++
++	bool QueueAndCheckBlocked(PacketMonitor::PacketLogEntry& entry) {
++		EnsurePacketMonitorInitialized();
++		EnterCriticalSection(&g_packetMonitorLock);
++
++		std::set<USHORT>& blocked = entry.outgoing ? g_sendBlocked : g_recvBlocked;
++		const bool shouldBlock = entry.header != 0xFFFF && blocked.find(entry.header) != blocked.end();
++		const bool shouldLog = entry.outgoing
++			? InterlockedCompareExchange(&g_sendLogging, FALSE, FALSE) != FALSE
++			: InterlockedCompareExchange(&g_recvLogging, FALSE, FALSE) != FALSE;
++
++		if (shouldLog) {
++			std::deque<PacketMonitor::PacketLogEntry>& queue = entry.outgoing ? g_sendEntries : g_recvEntries;
++			if (queue.size() >= MAX_QUEUED_PACKETS)
++				queue.pop_front();
++			queue.push_back(entry);
++		}
++
++		LeaveCriticalSection(&g_packetMonitorLock);
++		return shouldBlock;
++	}
++
++	void __fastcall SendPacketDetour(PVOID clientSocket, PVOID, COutPacket* packet) {
++		PacketMonitor::PacketLogEntry entry = {};
++		const bool hasSnapshot = SnapshotOutPacket(packet, entry);
++		if (hasSnapshot && QueueAndCheckBlocked(entry))
++			return;
++		g_sendTarget(clientSocket, packet);
++	}
++
++	void __fastcall RecvPacketDetour(PVOID clientSocket, PVOID, CInPacket* packet) {
++		PacketMonitor::PacketLogEntry entry = {};
++		const bool hasSnapshot = SnapshotInPacket(packet, entry);
++		if (hasSnapshot && QueueAndCheckBlocked(entry))
++			return;
++		g_recvTarget(clientSocket, packet);
++	}
++
++	bool ChangeDetour(bool attach, PVOID* target, PVOID detour) {
++		if (DetourTransactionBegin() != NO_ERROR)
++			return false;
++		if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR) {
++			DetourTransactionAbort();
++			return false;
++		}
++
++		const LONG operation = attach ? DetourAttach(target, detour) : DetourDetach(target, detour);
++		if (operation != NO_ERROR) {
++			DetourTransactionAbort();
++			return false;
++		}
++
++		if (DetourTransactionCommit() != NO_ERROR) {
++			DetourTransactionAbort();
++			return false;
++		}
++		return true;
++	}
++
++	bool EnsureHookInstalled(bool outgoing) {
++		EnsurePacketMonitorInitialized();
++		EnterCriticalSection(&g_packetMonitorLock);
++		bool& installed = outgoing ? g_sendHookInstalled : g_recvHookInstalled;
++		bool ok = true;
++		if (!installed) {
++			ok = outgoing
++				? ChangeDetour(true, reinterpret_cast<PVOID*>(&g_sendTarget), reinterpret_cast<PVOID>(SendPacketDetour))
++				: ChangeDetour(true, reinterpret_cast<PVOID*>(&g_recvTarget), reinterpret_cast<PVOID>(RecvPacketDetour));
++			if (ok)
++				installed = true;
++		}
++		LeaveCriticalSection(&g_packetMonitorLock);
++		return ok;
++	}
++}
++
++bool PacketMonitor::SetLoggingEnabled(bool outgoing, bool enabled) {
++	if (enabled && !EnsureHookInstalled(outgoing))
++		return false;
++
++	if (outgoing)
++		InterlockedExchange(&g_sendLogging, enabled ? TRUE : FALSE);
++	else
++		InterlockedExchange(&g_recvLogging, enabled ? TRUE : FALSE);
++	return true;
++}
++
++bool PacketMonitor::IsLoggingEnabled(bool outgoing) {
++	return outgoing
++		? InterlockedCompareExchange(&g_sendLogging, FALSE, FALSE) != FALSE
++		: InterlockedCompareExchange(&g_recvLogging, FALSE, FALSE) != FALSE;
++}
++
++void PacketMonitor::Drain(bool outgoing, std::vector<PacketLogEntry>& entries) {
++	EnsurePacketMonitorInitialized();
++	EnterCriticalSection(&g_packetMonitorLock);
++	std::deque<PacketLogEntry>& queue = outgoing ? g_sendEntries : g_recvEntries;
++	entries.reserve(entries.size() + queue.size());
++	while (!queue.empty()) {
++		entries.push_back(queue.front());
++		queue.pop_front();
++	}
++	LeaveCriticalSection(&g_packetMonitorLock);
++}
++
++void PacketMonitor::Clear(bool outgoing) {
++	EnsurePacketMonitorInitialized();
++	EnterCriticalSection(&g_packetMonitorLock);
++	(outgoing ? g_sendEntries : g_recvEntries).clear();
++	LeaveCriticalSection(&g_packetMonitorLock);
++}
++
++bool PacketMonitor::SetHeaderBlocked(bool outgoing, USHORT header, bool blocked) {
++	if (blocked && !EnsureHookInstalled(outgoing))
++		return false;
++
++	EnsurePacketMonitorInitialized();
++	EnterCriticalSection(&g_packetMonitorLock);
++	std::set<USHORT>& headers = outgoing ? g_sendBlocked : g_recvBlocked;
++	if (blocked)
++		headers.insert(header);
++	else
++		headers.erase(header);
++	LeaveCriticalSection(&g_packetMonitorLock);
++	return true;
++}
++
++std::vector<USHORT> PacketMonitor::GetBlockedHeaders(bool outgoing) {
++	EnsurePacketMonitorInitialized();
++	EnterCriticalSection(&g_packetMonitorLock);
++	const std::set<USHORT>& headers = outgoing ? g_sendBlocked : g_recvBlocked;
++	std::vector<USHORT> result(headers.begin(), headers.end());
++	LeaveCriticalSection(&g_packetMonitorLock);
++	return result;
++}
++
++void PacketMonitor::Shutdown() {
++	EnsurePacketMonitorInitialized();
++	InterlockedExchange(&g_sendLogging, FALSE);
++	InterlockedExchange(&g_recvLogging, FALSE);
++
++	EnterCriticalSection(&g_packetMonitorLock);
++	if (g_sendHookInstalled && ChangeDetour(false, reinterpret_cast<PVOID*>(&g_sendTarget), reinterpret_cast<PVOID>(SendPacketDetour)))
++		g_sendHookInstalled = false;
++	if (g_recvHookInstalled && ChangeDetour(false, reinterpret_cast<PVOID*>(&g_recvTarget), reinterpret_cast<PVOID>(RecvPacketDetour)))
++		g_recvHookInstalled = false;
++	g_sendEntries.clear();
++	g_recvEntries.clear();
++	g_sendBlocked.clear();
++	g_recvBlocked.clear();
++	LeaveCriticalSection(&g_packetMonitorLock);
++}
++#pragma managed(pop)
+ 
+ void writeByte(String^ %packet, BYTE byte) {
+ 	packet += byte.ToString("X2") + " ";
+ }
+ 
+ void writeBytes(String^ %packet, array<BYTE>^ bytes) {
+-	for each(BYTE byte in bytes) packet += byte.ToString("X2") + " ";
++	for each(BYTE byte in bytes)
++		packet += byte.ToString("X2") + " ";
+ }
+ 
+ void writeString(String^ %packet, String^ str) {
+@@ -32,85 +286,95 @@ void writeString(String^ %packet, String^ str) {
+ }
+ 
+ void writeInt(String^ %packet, int num) {
+-	writeByte(packet, (BYTE)num);
+-	writeByte(packet, (BYTE)((UINT)num >> 8 & 0xFF));
+-	writeByte(packet, (BYTE)((UINT)num >> 16 & 0xFF));
+-	writeByte(packet, (BYTE)((UINT)num >> 24 & 0xFF));
++	writeByte(packet, static_cast<BYTE>(num));
++	writeByte(packet, static_cast<BYTE>(static_cast<UINT>(num) >> 8 & 0xFF));
++	writeByte(packet, static_cast<BYTE>(static_cast<UINT>(num) >> 16 & 0xFF));
++	writeByte(packet, static_cast<BYTE>(static_cast<UINT>(num) >> 24 & 0xFF));
+ }
+ 
+ void writeShort(String^ %packet, short num) {
+-	writeByte(packet, (BYTE)num);
+-	writeByte(packet, (BYTE)((UINT)num >> 8 & 0xFF));
++	writeByte(packet, static_cast<BYTE>(num));
++	writeByte(packet, static_cast<BYTE>(static_cast<UINT>(num) >> 8 & 0xFF));
++}
++
++void writeUnsignedShort(String^ %packet, USHORT num) {
++	writeByte(packet, static_cast<BYTE>(num));
++	writeByte(packet, static_cast<BYTE>(static_cast<UINT>(num) >> 8 & 0xFF));
+ }
+ 
+-void writeUnsignedShort(System::String^ %packet, USHORT num) {
+-	writeByte(packet, (BYTE)num);
+-	writeByte(packet, (BYTE)((UINT)num >> 8 & 0xFF));
++static int HexNibble(Char value) {
++	if (value >= '0' && value <= '9') return value - '0';
++	if (value >= 'A' && value <= 'F') return value - 'A' + 10;
++	if (value == '*') return rand() % 16;
++	return -1;
+ }
+ 
+-bool IsValidRawPacket(String^ rawPacket) {
+-	if (String::IsNullOrEmpty(rawPacket)) {
+-		Log::WriteLineToConsole("SendPacket::ERROR: Packet is Empty!");
++static bool ParsePacketBytes(String^ packetStr, std::vector<BYTE>& bytes) {
++	if (String::IsNullOrWhiteSpace(packetStr)) {
++		Log::WriteLineToConsole("Packet::ERROR: Packet is empty.");
+ 		return false;
+ 	}
+-	for (int i = 0; i < rawPacket->Length; i++) {
+-		if (rawPacket[i] >= '0' && rawPacket[i] <= '9') continue;
+-		if (rawPacket[i] >= 'A' && rawPacket[i] <= 'F') continue;
+-		if (rawPacket[i] == '*') continue;
+ 
+-		Log::WriteLineToConsole("SendPacket::ERROR: Invalid character detected in packet: It contains a \"" + rawPacket[i] + "\"");
++	String^ raw = packetStr->Replace(" ", String::Empty)
++		->Replace("\r", String::Empty)
++		->Replace("\n", String::Empty)
++		->Replace("\t", String::Empty)
++		->ToUpperInvariant();
++	if (raw->Length == 0 || (raw->Length & 1) != 0) {
++		Log::WriteLineToConsole("Packet::ERROR: Hex data must contain complete byte pairs.");
++		return false;
++	}
++	if (raw->Length / 2 > 0xFFFF) {
++		Log::WriteLineToConsole("Packet::ERROR: Packet is larger than the v83 packet length field.");
+ 		return false;
+ 	}
+ 
++	bytes.resize(raw->Length / 2);
++	for (int i = 0; i < raw->Length; i += 2) {
++		const int high = HexNibble(raw[i]);
++		const int low = HexNibble(raw[i + 1]);
++		if (high < 0 || low < 0) {
++			Log::WriteLineToConsole("Packet::ERROR: Invalid hex character near position " + i + ".");
++			bytes.clear();
++			return false;
++		}
++		bytes[i / 2] = static_cast<BYTE>((high << 4) | low);
++	}
+ 	return true;
+ }
+ 
+-// TODO: more error checking/thread safety
+-bool SendPacket(String^ packetStr)
+-{
+-	COutPacket Packet;
+-	SecureZeroMemory(&Packet, sizeof(COutPacket));
+-	// Clean whitespace
+-	String^ rawPacket = packetStr->Replace(" ", String::Empty);
+-	
+-	if (!IsValidRawPacket(rawPacket)) return false;
+-
+-	// Create random bytes for "*"
+-	String^ processedPacket = rawPacket->Replace("*", (rand() % 16).ToString("X"));
+-
+-	// Temp buffer
+-	BYTE tmpPacketBuf[150];
+-
+-	// 32-bit pointer to a constant null-terminated string of 8-bit Windows (ANSI) characters
+-	const LPCSTR lpcszPacket = static_cast<LPCSTR>(Runtime::InteropServices::Marshal::StringToHGlobalAnsi(processedPacket).ToPointer());
+-
+-	Packet.Size = strlen(lpcszPacket) / 2;
+-
+-	// enforce only hex characters
+-	Packet.Data = atohx(tmpPacketBuf, lpcszPacket);
++bool SendPacket(String^ packetStr) {
++	std::vector<BYTE> bytes;
++	if (!ParsePacketBytes(packetStr, bytes))
++		return false;
+ 
+-	//try sending packet via Maplestory client packet hook
++	COutPacket packet = {};
++	packet.Size = static_cast<ULONG>(bytes.size());
++	packet.Data = bytes.data();
+ 	try {
+-		Send(*ClientSocket, &Packet);
++		Send(*ClientSocket, &packet);
+ 		return true;
+ 	}
+-	catch (...) { return false; }
++	catch (...) {
++		Log::WriteLineToConsole("SendPacket::ERROR: MapleStory rejected the packet call.");
++		return false;
++	}
+ }
+ 
+-bool RecvPacket(String^ packetStr)
+-{
+-	CInPacket Packet;
+-	SecureZeroMemory(&Packet, sizeof(CInPacket));
+-	String^ rawPacket = packetStr->Replace(" ", String::Empty)->Replace("*", (rand() % 16).ToString("X"));
+-	BYTE tmpPacketStr[150];
+-	const LPCSTR lpcszPacket = (LPCSTR)(Runtime::InteropServices::Marshal::StringToHGlobalAnsi(rawPacket).ToPointer());
+-
+-	Packet.Size = strlen(lpcszPacket) / 2;
+-	Packet.lpvData = atohx(tmpPacketStr, lpcszPacket);
++bool RecvPacket(String^ packetStr) {
++	std::vector<BYTE> bytes;
++	if (!ParsePacketBytes(packetStr, bytes))
++		return false;
+ 
++	CInPacket packet = {};
++	packet.Size = static_cast<USHORT>(bytes.size());
++	packet.lpvData = bytes.data();
+ 	try {
+-		Recv(*ClientSocket, &Packet);
++		Recv(*ClientSocket, &packet);
+ 		return true;
+ 	}
+-	catch (...) { return false; }
++	catch (...) {
++		Log::WriteLineToConsole("RecvPacket::ERROR: MapleStory rejected the packet call.");
++		return false;
++	}
+ }
+diff --git a/Timelapse/Packet.h b/Timelapse/Packet.h
+index 4823acd62b7f899f5ad01bed1cda2b16e3511363..2a75d7e45920277847d32109fca667794ce08a34 100644
+--- a/Timelapse/Packet.h
++++ b/Timelapse/Packet.h
+@@ -1,8 +1,33 @@
+ #pragma once
+ #include <Windows.h>
++#include <vector>
+ 
+ using namespace System;
+ 
++#pragma managed(push, off)
++namespace PacketMonitor {
++	struct PacketLogEntry {
++		bool outgoing;
++		ULONGLONG timestamp;
++		USHORT header;
++		UINT originalSize;
++		UINT offset;
++		std::vector<BYTE> bytes;
++	};
++
++	// The monitor uses Detours rather than the old five-byte JMP patch.  It
++	// owns the copied packet bytes, so the UI never dereferences a packet
++	// object that has already gone out of scope on the MapleStory thread.
++	bool SetLoggingEnabled(bool outgoing, bool enabled);
++	bool IsLoggingEnabled(bool outgoing);
++	void Drain(bool outgoing, std::vector<PacketLogEntry>& entries);
++	void Clear(bool outgoing);
++	bool SetHeaderBlocked(bool outgoing, USHORT header, bool blocked);
++	std::vector<USHORT> GetBlockedHeaders(bool outgoing);
++	void Shutdown();
++}
++#pragma managed(pop)
++
+ bool SendPacket(String^ packetStr);
+ bool RecvPacket(String^ packetStr);
+ //void __stdcall SendPacketHook();
+@@ -12,4 +37,4 @@ void writeBytes(String^ %packet, array<BYTE>^ bytes);
+ void writeString(String^ %packet, String^ str);
+ void writeInt(String^ %packet, int num);
+ void writeShort(String^ %packet, short num);
+-void writeUnsignedShort(String^ %packet, USHORT num);
+\ No newline at end of file
++void writeUnsignedShort(String^ %packet, USHORT num);
+diff --git a/Timelapse/Settings.cpp b/Timelapse/Settings.cpp
+index 7dbfe8b49d4313eac4a742e6c94093b39cca10c5..0e4ba3ae16881b680050db4f42f6cce92b622df9 100644
+--- a/Timelapse/Settings.cpp
++++ b/Timelapse/Settings.cpp
+@@ -5,6 +5,24 @@ using namespace Timelapse;
+ using namespace System;
+ using namespace IO;
+ using namespace Collections::Generic;
++using namespace System::Security::Cryptography;
++using namespace System::Text;
++
++static bool IsCredentialControlName(String^ controlName) {
++	return controlName == "tbAutoLoginPassword" || controlName == "tbAutoLoginPIC";
++}
++
++static String^ ProtectCredentialText(String^ value) {
++	array<Byte>^ clearBytes = Encoding::UTF8->GetBytes(value == nullptr ? String::Empty : value);
++	array<Byte>^ protectedBytes = ProtectedData::Protect(clearBytes, nullptr, DataProtectionScope::CurrentUser);
++	return Convert::ToBase64String(protectedBytes);
++}
++
++static String^ UnprotectCredentialText(String^ value) {
++	array<Byte>^ protectedBytes = Convert::FromBase64String(value);
++	array<Byte>^ clearBytes = ProtectedData::Unprotect(protectedBytes, nullptr, DataProtectionScope::CurrentUser);
++	return Encoding::UTF8->GetString(clearBytes);
++}
+ 
+ Object^ Settings::Deserialize(String^ path, XmlSerializer^ serializer) {
+ 	if (File::Exists(path)) {
+@@ -48,29 +66,46 @@ void Settings::Serialize(String^ path, XmlSerializer^ serializer, Object^ object
+ 	}
+ }
+ 
+-void Settings::Serialize(Control^ c, String^ XmlFileName) {
+-	XmlTextWriter^ xmlSerializedForm = gcnew XmlTextWriter(XmlFileName, System::Text::Encoding::Default);
++bool Settings::Serialize(Control^ c, String^ XmlFileName) {
++	XmlTextWriter^ xmlSerializedForm = nullptr;
++
++	try {
++		String^ directory = Path::GetDirectoryName(XmlFileName);
++		if (!String::IsNullOrWhiteSpace(directory))
++			Directory::CreateDirectory(directory);
+ 
+-	xmlSerializedForm->Formatting = Formatting::Indented;
+-	xmlSerializedForm->WriteStartDocument();
+-	xmlSerializedForm->WriteStartElement("Timelapse");
++		xmlSerializedForm = gcnew XmlTextWriter(XmlFileName, System::Text::Encoding::UTF8);
++		xmlSerializedForm->Formatting = Formatting::Indented;
++		xmlSerializedForm->WriteStartDocument();
++		xmlSerializedForm->WriteStartElement("Timelapse");
+ 
+-	// enumerate all controls on the form, and serialize them as appropriate
+-	AddChildControls(xmlSerializedForm, c);
++		// Enumerate all supported controls on the form.
++		AddChildControls(xmlSerializedForm, c);
+ 
+-	xmlSerializedForm->WriteEndElement();
+-	xmlSerializedForm->WriteEndDocument();
+-	xmlSerializedForm->Flush();
+-	xmlSerializedForm->Close();
++		xmlSerializedForm->WriteEndElement();
++		xmlSerializedForm->WriteEndDocument();
++		xmlSerializedForm->Flush();
++		xmlSerializedForm->Close();
++		xmlSerializedForm = nullptr;
++		Log::WriteLine("Saved " + XmlFileName);
++		return File::Exists(XmlFileName) && (gcnew FileInfo(XmlFileName))->Length > 0;
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Exception occured while saving settings to " + XmlFileName + " : " + ex->Message);
++	}
++	finally {
++		if (xmlSerializedForm != nullptr)
++			xmlSerializedForm->Close();
++	}
+ 
+-	Log::WriteLine("Saved " + XmlFileName);
++	return false;
+ }
+ 
+ bool Settings::isExcluded(Control^ ctrl) {
+ 	const auto ctrlName = ctrl->Name;
+ 	if (ctrlName == "lbConsoleLog" || ctrlName == "tbItemFilterSearch" || ctrlName == "tbItemFilterSearch" || ctrlName == "lbItemSearchLog" ||
+ 		ctrlName == "lbMobSearchLog" || ctrlName == "tbMobFilterSearch" || ctrlName == "tbSendPacket" || ctrlName == "tbMapRusherSearch" || 
+-		ctrlName == "lvMapRusherSearch" || ctrlName == "lvBuff")
++		ctrlName == "lvMapRusherSearch")
+ 		return true;
+ 
+ 	return false;
+@@ -80,10 +115,15 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 	for each(Control^ childCtrl in c->Controls) {
+ 		auto ctrlType = childCtrl->GetType();
+ 		auto ctrlName = childCtrl->Name;
++		bool isSerializableControl = ctrlType == ComboBox::typeid || ctrlType == NumericUpDown::typeid ||
++			ctrlType == CheckBox::typeid || ctrlType == TextBox::typeid || ctrlType == ListBox::typeid ||
++			ctrlType == ListView::typeid;
++
++		if (isExcluded(childCtrl))
++			continue;
+ 
+ 		//TODO: save press state of buttons?
+-		if (childCtrl->HasChildren || ctrlType == ComboBox::typeid || ctrlType == NumericUpDown::typeid || ctrlType == CheckBox::typeid || 
+-			ctrlType == TextBox::typeid || ctrlType == ListBox::typeid && c && !isExcluded(childCtrl)) { 
++		if (childCtrl->HasChildren || isSerializableControl) {
+ 			// serialize this control
+ 			xmlSerializedForm->WriteStartElement("Control");
+ 			xmlSerializedForm->WriteAttributeString("Name", ctrlName);
+@@ -94,8 +134,13 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 				xmlSerializedForm->WriteAttributeString("Value", safe_cast<NumericUpDown^>(childCtrl)->Value.ToString());
+ 			else if (ctrlType == CheckBox::typeid)
+ 				xmlSerializedForm->WriteAttributeString("Checked", safe_cast<CheckBox^>(childCtrl)->Checked.ToString());
+-			else if (ctrlType == TextBox::typeid)
+-				xmlSerializedForm->WriteAttributeString("Text", safe_cast<TextBox^>(childCtrl)->Text->ToString());
++			else if (ctrlType == TextBox::typeid) {
++				String^ text = safe_cast<TextBox^>(childCtrl)->Text;
++				if (IsCredentialControlName(ctrlName))
++					xmlSerializedForm->WriteAttributeString("ProtectedText", ProtectCredentialText(text));
++				else
++					xmlSerializedForm->WriteAttributeString("Text", text == nullptr ? String::Empty : text);
++			}
+ 			else if (ctrlType == ListBox::typeid) {
+ 				ListBox^ listBox = safe_cast<ListBox^>(childCtrl);
+ 				int listBoxItemCnt = listBox->Items->Count;
+@@ -108,9 +153,24 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 					xmlSerializedForm->WriteAttributeString(listBoxItemNmbStr, listBoxItemStr);
+ 				}
+ 			}
++			else if (ctrlType == ListView::typeid) {
++				ListView^ listView = safe_cast<ListView^>(childCtrl);
++				int itemCnt = listView->Items->Count;
++				xmlSerializedForm->WriteAttributeString("ListViewItemCnt", itemCnt.ToString());
++
++				for (int i = 0; i < itemCnt; i++) {
++					ListViewItem^ item = listView->Items[i];
++					String^ itemPrefix = "Item" + i.ToString();
++					xmlSerializedForm->WriteAttributeString(itemPrefix + "Checked", item->Checked.ToString());
++					xmlSerializedForm->WriteAttributeString(itemPrefix + "SubItemCnt", item->SubItems->Count.ToString());
++
++					for (int j = 0; j < item->SubItems->Count; j++)
++						xmlSerializedForm->WriteAttributeString(itemPrefix + "SubItem" + j.ToString(), item->SubItems[j]->Text);
++				}
++			}
+ 
+ 			// see if this control has any children, and if so, serialize them
+-			if (childCtrl->HasChildren && ctrlType != NumericUpDown::typeid)
++			if (childCtrl->HasChildren && !isSerializableControl)
+ 				AddChildControls(xmlSerializedForm, childCtrl);
+ 
+ 			xmlSerializedForm->WriteEndElement(); // Control
+@@ -118,20 +178,29 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 	}
+ }
+ 
+-void Settings::Deserialize(Control^ c, String^ XmlFileName) {
+-	if (File::Exists(XmlFileName)) {
+-		try {
+-			XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
+-			xmlSerializedForm->Load(XmlFileName);
++bool Settings::Deserialize(Control^ c, String^ XmlFileName) {
++	if (!File::Exists(XmlFileName))
++		return false;
+ 
+-			XmlNode^ topLevel = xmlSerializedForm->ChildNodes[1];
+-			for each(XmlNode^ n in topLevel->ChildNodes)
+-				SetControlProperties(safe_cast<Control^>(c), n);
+-		}
+-		catch (Exception^ ex) {
+-			Log::WriteLine("While deserializing \"" + c->Name + "\" the following exception occured: \"" + ex->Message + "\"");
+-		}
++	try {
++		XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
++		xmlSerializedForm->Load(XmlFileName);
++
++		XmlNode^ topLevel = xmlSerializedForm->DocumentElement;
++		if (topLevel == nullptr || topLevel->Name != "Timelapse")
++			return false;
++
++		for each(XmlNode^ n in topLevel->ChildNodes)
++			SetControlProperties(safe_cast<Control^>(c), n);
++
++		Log::WriteLine("Loaded " + XmlFileName);
++		return true;
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("While deserializing \"" + c->Name + "\" the following exception occured: \"" + ex->Message + "\"");
+ 	}
++
++	return false;
+ }
+ 
+ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+@@ -140,6 +209,8 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+ 		String^ ctrlName = n->Attributes["Name"]->Value;
+ 		// find the control
+ 		auto ctrl = currentCtrl->Controls->Find(ctrlName, true);
++		if (ctrl == nullptr || ctrl->Length == 0)
++			return;
+ 
+ 		// the right type too
+ 		if (n->Attributes["SelectedIndex"])
+@@ -148,19 +219,42 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+ 			safe_cast<NumericUpDown^>(ctrl[0])->Value = Convert::ToDecimal(n->Attributes["Value"]->Value);
+ 		else if (n->Attributes["Checked"])
+ 			safe_cast<CheckBox^>(ctrl[0])->Checked = Convert::ToBoolean(n->Attributes["Checked"]->Value);
++		else if (n->Attributes["ProtectedText"])
++			safe_cast<TextBox^>(ctrl[0])->Text = UnprotectCredentialText(n->Attributes["ProtectedText"]->Value);
+ 		else if (n->Attributes["Text"])
+ 			safe_cast<TextBox^>(ctrl[0])->Text = Convert::ToString(n->Attributes["Text"]->Value);
+ 		else if (n->Attributes["ItemCnt"]) {
+ 			int itemCnt = Convert::ToInt32(n->Attributes["ItemCnt"]->Value);
+ 			auto collection = safe_cast<ListBox^>(ctrl[0])->Items;
++			collection->Clear();
+ 
+-			if (itemCnt < 1) return;
+ 			for (int i = 0; i < itemCnt; i++) {
+ 				String^ indexedListBoxItemStr = ctrlName + "Item" + i.ToString();
+ 				String^ itemToAddStr = Convert::ToString(n->Attributes[indexedListBoxItemStr]->Value);
+ 				collection->Add(itemToAddStr);
+ 			}
+ 		}
++		else if (n->Attributes["ListViewItemCnt"]) {
++			ListView^ listView = safe_cast<ListView^>(ctrl[0]);
++			int itemCnt = Convert::ToInt32(n->Attributes["ListViewItemCnt"]->Value);
++			listView->BeginUpdate();
++			listView->Items->Clear();
++
++			for (int i = 0; i < itemCnt; i++) {
++				String^ itemPrefix = "Item" + i.ToString();
++				int subItemCnt = Convert::ToInt32(n->Attributes[itemPrefix + "SubItemCnt"]->Value);
++				array<String^>^ row = gcnew array<String^>(subItemCnt);
++
++				for (int j = 0; j < subItemCnt; j++)
++					row[j] = Convert::ToString(n->Attributes[itemPrefix + "SubItem" + j.ToString()]->Value);
++
++				ListViewItem^ item = gcnew ListViewItem(row);
++				listView->Items->Add(item);
++				item->Checked = Convert::ToBoolean(n->Attributes[itemPrefix + "Checked"]->Value);
++			}
++
++			listView->EndUpdate();
++		}
+ 
+ 		// if n has any children that are controls, deserialize them as well
+ 		if (n->HasChildNodes && ctrl[0]->HasChildren) {
+@@ -180,6 +274,7 @@ String^ Settings::GetSettingsPath() {
+ 
+ 	try {
+ 		String^ TimelapseFolderPath = Path::Combine(AppDataFolder, "Timelapse");
++		Directory::CreateDirectory(TimelapseFolderPath);
+ 		SettingsFilePath = Path::Combine(TimelapseFolderPath, "Settings.xml");
+ 	}
+ 	catch (Exception^ ex) {
+diff --git a/Timelapse/Settings.h b/Timelapse/Settings.h
+index 7ce77ad208b45e9a96c76ac943144f7418983d2a..5ca6c0057112315765d2f20d7ba459a37ae273ce 100644
+--- a/Timelapse/Settings.h
++++ b/Timelapse/Settings.h
+@@ -9,9 +9,9 @@ namespace Timelapse {
+ 	public ref class Settings {
+ 		public:
+ 			static Object^ Deserialize(String^ Path, XmlSerializer^ Deserializer);
+-			static void Deserialize(Control^ c, String^ Path);
++			static bool Deserialize(Control^ c, String^ Path);
+ 			static void Serialize(String^ Path, XmlSerializer^ Serializer, Object^ Collection);
+-			static void Serialize(Control^ c, String^ Path);
++			static bool Serialize(Control^ c, String^ Path);
+ 			static bool isExcluded(Control^ ctrl);
+ 			static String^ GetSettingsPath();
+ 
+diff --git a/Timelapse/Structs.h b/Timelapse/Structs.h
+index abc51fd626074026909f9fe8f4668260b106a6f0..c9cdf2df6cd3a827d9caa76ab5eba028ca72e2e5 100644
+--- a/Timelapse/Structs.h
++++ b/Timelapse/Structs.h
+@@ -32,7 +32,10 @@ struct CInPacket {
+ 			PUCHAR Data;
+ 		} *pData;
+ 	};
+-	ULONG Size;
++	// CInPacket::m_usLength is a 16-bit value in the v83 client.  Keeping
++	// this field at 32 bits shifts every field that follows it and makes a
++	// receive hook read the wrong offset/length values.
++	USHORT Size;
+ 	USHORT usRawSeq;
+ 	USHORT usDataLen;
+ 	USHORT usUnknown;
+@@ -78,4 +81,4 @@ ref struct MapPath {
+ 		this->mapID = mapID;
+ 		this->portal = portal;
+ 	}
+-};
+\ No newline at end of file
++};
+diff --git a/Timelapse/Timelapse.vcxproj b/Timelapse/Timelapse.vcxproj
+index 8e3fefdc62d4e2206dfede02d464da81fec06b78..24d00d8a26f4349f953bf33df7fea192266d40c8 100644
+--- a/Timelapse/Timelapse.vcxproj
++++ b/Timelapse/Timelapse.vcxproj
+@@ -135,6 +135,7 @@
+     <Reference Include="System" />
+     <Reference Include="System.Data" />
+     <Reference Include="System.Drawing" />
++    <Reference Include="System.Security" />
+     <Reference Include="System.Windows.Forms" />
+     <Reference Include="System.Xml" />
+   </ItemGroup>
