@@ -1,0 +1,669 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Sat, 15 Aug 2026 20:05:28 -0400
+Subject: [PATCH] Fix settings, auto buff, and mouse teleport
+
+---
+ Timelapse/Log.cpp      |   3 +-
+ Timelapse/Macro.h      | 106 ++++++++++++++++++++++++--------------
+ Timelapse/MainForm.cpp | 113 +++++++++++++++++++++++++++++++++--------
+ Timelapse/MainForm.h   |   5 +-
+ Timelapse/Settings.cpp |  99 ++++++++++++++++++++++++++++--------
+ 5 files changed, 245 insertions(+), 81 deletions(-)
+
+diff --git a/Timelapse/Log.cpp b/Timelapse/Log.cpp
+index 3d84ec7..dd9cd77 100644
+--- a/Timelapse/Log.cpp
++++ b/Timelapse/Log.cpp
+@@ -31,6 +31,7 @@ String^ Log::GetLogPath() {
+ 
+ 	try {
+ 		String^ TimelapseFolderPath = Path::Combine(AppDataFolder, "Timelapse");
++		Directory::CreateDirectory(TimelapseFolderPath);
+ 		LogsFilePath = Path::Combine(TimelapseFolderPath, "Log.txt");
+ 	} 
+ 	catch (Exception^){}
+@@ -51,4 +52,4 @@ String^ Log::GetLogPath() {
+ 	while (MainForm::TheInstance->lbConsoleLog->Items->Count > LOG_MAX_LINES) {
+ 		MainForm::TheInstance->lbConsoleLog->Items->RemoveAt(MainForm::TheInstance->lbConsoleLog->Items->Count - 1);
+ 	}
+-}
+\ No newline at end of file
++}
+diff --git a/Timelapse/Macro.h b/Timelapse/Macro.h
+index 023ca14..208d91b 100644
+--- a/Timelapse/Macro.h
++++ b/Timelapse/Macro.h
+@@ -25,20 +25,24 @@ typedef struct tag_KEYDATA {
+ 	BYTE flagUp : 1;
+ } KEYDATA;
+ 
+-static DWORD createKeyData(int Key) {
+-	KEYDATA kd;
+-	memset(&kd, 0, sizeof(KEYDATA));
+-	kd.keyRepeatCnt = 1;
+-	kd.keyScanCode = static_cast<BYTE>(MapVirtualKey(Key, 0));
+-	kd.flagExtendedKey = 0;
+-	kd.Reserved = 0;
+-	kd.flagAltDown = 0; // this has to be 0 else no lumping of messages
+-	kd.flagRepeat = 1; // this is necessary for proper execution in maplestory
+-	kd.flagUp = 0;
+-	DWORD dwVal;
+-	memcpy(&dwVal, &kd, sizeof(DWORD));
++static bool isExtendedKey(int key) {
++	switch (key) {
++		case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
++		case VK_PRIOR: case VK_NEXT: case VK_LEFT: case VK_RIGHT:
++		case VK_UP: case VK_DOWN: case VK_RCONTROL: case VK_RMENU:
++			return true;
++		default:
++			return false;
++	}
++}
+ 
+-	return dwVal;
++static LPARAM createKeyData(int key, bool keyUp) {
++	LPARAM keyData = 1 | (MapVirtualKey(key, MAPVK_VK_TO_VSC) << 16);
++	if (isExtendedKey(key))
++		keyData |= (1 << 24);
++	if (keyUp)
++		keyData |= 0xC0000000;
++	return keyData;
+ }
+ 
+ ref struct KeyMacro {
+@@ -53,10 +57,10 @@ ref struct KeyMacro {
+ 	// basically this represents magical keyboard which repeatedly presses keys down but doesn't need any kind of going up with keys
+ 	// thus this non-physical keyboard will cause certain skills like charge abilities to be permanently stuck charging
+ 	static void SendKey(int Key) {
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("SendKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 		}
+ 	}
+ 
+@@ -66,35 +70,33 @@ ref struct KeyMacro {
+ 	// then OS should lump these into one message and process it much faster
+ 	static void SpamSendKey(int Key, int times) {	
+ 		for (int i = 0; i < times; i++) {
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 			 if (DBG_Macro) {
+ 				 Log::WriteLineToConsole("SpamSendKey: ERROR failed to post message to process!");
+-				 Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++				 Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 			 }
+ 		}
+ 	}
+ 
+ 	// This simulates repeated bashing of a keystroke on a regular physical keyboard
+ 	static void PressKey(int Key) {
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("PressKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 		}
+-		//WM_CHAR
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key, true));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("PressKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYUP " + "KeyData: " + createKeyData(Key, true));
+ 		}
+ 	}
+ 
+ 	// unused for now
+ 	static void SpamPressKey(int Key, int times) {
+ 		for (int i = 0; i < times; i++) {
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
+-			//WM_CHAR
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key, true));
+ 		}
+ 	}
+ };
+@@ -104,17 +106,42 @@ public:
+ 	static cliext::priority_queue<KeyMacro^>^ macroQueue = gcnew cliext::priority_queue<KeyMacro^>();
+ 	static bool closeMacroQueue = false;
+ 
++	static void Push(KeyMacro^ key) {
++		Threading::Monitor::Enter(macroQueue);
++		try {
++			macroQueue->push(key);
++		}
++		finally {
++			Threading::Monitor::Exit(macroQueue);
++		}
++	}
++
++	static bool TryPop(KeyMacro^% key) {
++		key = nullptr;
++		Threading::Monitor::Enter(macroQueue);
++		try {
++			if (macroQueue->empty())
++				return false;
++			key = macroQueue->top();
++			macroQueue->pop();
++			return true;
++		}
++		finally {
++			Threading::Monitor::Exit(macroQueue);
++		}
++	}
++
+ 	static void MacroQueueWorker() {
+ 		if (GlobalVars::mapleWindow == nullptr) 
+ 			GlobalVars::mapleWindow = GetMSWindowHandle();
+ 
+ 		while(!closeMacroQueue) {
+-			if (macroQueue == nullptr || macroQueue->empty())
++			KeyMacro^ key = nullptr;
++			if (!TryPop(key)) {
++				Threading::Thread::Sleep(1);
+ 				continue;
+-			
+-			Threading::Monitor::Enter(macroQueue);
+-			KeyMacro ^key = macroQueue->top();
+-			macroQueue->pop();		
++			}
++
+ 			if (DBG_Macro) Log::WriteLineToConsole("MacroQueueSizeAfterPop: " + macroQueue->size());
+ 
+ 			switch(key->macroType) {
+@@ -142,13 +169,13 @@ public:
+ 						KeyMacro::SpamSendKey(key->keyCode, 2);
+ 					break;
+ 			}
+-			Threading::Monitor::Exit(macroQueue);
+ 		}
+ 	}
+ };
+ 
+ ref class Macro {
+ 	Threading::Timer^ timer;
++	bool enabled;
+ 
+ 	void SendKeyMacroToQueue() {
+ 		if (DBG_Macro) Log::WriteLineToConsole("Entered SendKeyToQueue");
+@@ -161,7 +188,7 @@ ref class Macro {
+ 			// TODO: buffs need better handling
+ 			case MacroType::BUFFMACRO:		
+ 				if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-				PriorityQueue::macroQueue->push(keyMacro);
++				PriorityQueue::Push(keyMacro);
+ 			break;
+ 			case MacroType::HPPOTMACRO:
+ 				if (MacrosEnabled::bMacroHP && HelperFuncs::IsInGame()) {
+@@ -171,7 +198,7 @@ ref class Macro {
+ 
+ 					if (hpCntCurrent < hpCntDrinkLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -183,7 +210,7 @@ ref class Macro {
+ 
+ 					if (mpCntCurrent < mpCntDrinkLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -195,7 +222,7 @@ ref class Macro {
+ 
+ 					if (itemCntCurrent > itemCntLootLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -207,7 +234,7 @@ ref class Macro {
+ 
+ 					if (mobCntCurrent > mobCntAttackLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -250,6 +277,7 @@ public:
+ 		this->keyCode = keyCode;
+ 		this->delay = delay;
+ 		this->macroType = macro;
++		this->enabled = false;
+ 		if (DBG_Macro) DebugMacro(this);
+ 		Threading::TimerCallback^ TimerDelegate = gcnew Threading::TimerCallback(this, &Macro::TimerElapsed);
+ 		timer = gcnew Threading::Timer(TimerDelegate, nullptr, Threading::Timeout::Infinite, delay);
+@@ -259,10 +287,14 @@ public:
+ 	// TODO: if buffMacro check if i have it present if not cast it for first time
+ 	void Toggle(bool enable) {	
+ 		if (enable) {
++			if (!enabled && macroType == MacroType::BUFFMACRO)
++				SendKeyMacroToQueue();
++			enabled = true;
+ 			timer->Change(delay, delay);			
+ 		}				
+ 		else {
++			enabled = false;
+ 			timer->Change(Threading::Timeout::Infinite, Threading::Timeout::Infinite);					
+ 		}
+ 	}
+-};
+\ No newline at end of file
++};
+diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
+index 3c102b2..282182c 100644
+--- a/Timelapse/MainForm.cpp
++++ b/Timelapse/MainForm.cpp
+@@ -24,6 +24,7 @@ ref struct GlobalRefs {
+ 	static Macro ^macroHP, ^macroMP, ^macroAttack, ^macroLoot;
+ 	static bool isChangingField = false, isMapRushing = false;
+ 	static bool bClickTeleport = false, bMouseTeleport = false, bTeleport = false, bKami = false, bKamiLoot = false;
++	static UINT clickTeleportDelay = 100, mouseTeleportDelay = 100;
+ 	static bool bWallVac = false, bDupeX = false, bMMC = false, bUEMI = false;
+ 	static UINT cccsTimerTickCount = 0;
+ 	static bool isDragging = false, isEmbedding = false;
+@@ -534,6 +535,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
+ static int keyCollection[] = { 0x10, 0x11, 0x12, 0x20, 0x2D, 0x2E, 0x24, 0x23, 0x21, 0x22, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51,
+ 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39 };
+ 
++static int GetKeyCodeFromName(String^ keyName) {
++	if (String::IsNullOrWhiteSpace(keyName))
++		return 0;
++
++	String^ key = keyName->Trim()->ToUpperInvariant();
++	if (key->Length == 1) {
++		wchar_t value = key[0];
++		if ((value >= L'A' && value <= L'Z') || (value >= L'0' && value <= L'9'))
++			return (int)value;
++	}
++
++	if (key == "SHIFT") return VK_SHIFT;
++	if (key == "CONTROL") return VK_CONTROL;
++	if (key == "ALT") return VK_MENU;
++	if (key == "SPACE") return VK_SPACE;
++	if (key == "INSERT") return VK_INSERT;
++	if (key == "DELETE") return VK_DELETE;
++	if (key == "HOME") return VK_HOME;
++	if (key == "END") return VK_END;
++	if (key == "PAGE UP") return VK_PRIOR;
++	if (key == "PAGE DOWN") return VK_NEXT;
++	return 0;
++}
++
++static Macro^ GetOrCreateBuffMacro(ListViewItem^ item) {
++	if (item == nullptr)
++		return nullptr;
++
++	Macro^ macro = dynamic_cast<Macro^>(item->Tag);
++	if (macro != nullptr)
++		return macro;
++
++	if (item->SubItems->Count < 3)
++		return nullptr;
++
++	int keyCode = GetKeyCodeFromName(item->SubItems[1]->Text);
++	UInt32 intervalSeconds = 0;
++	if (keyCode == 0 || !UInt32::TryParse(item->SubItems[2]->Text, intervalSeconds) || intervalSeconds == 0 || intervalSeconds > 2147483)
++		return nullptr;
++
++	macro = gcnew Macro(keyCode, (int)(intervalSeconds * 1000), MacroType::BUFFMACRO);
++	item->Tag = macro;
++	return macro;
++}
++
+ //Check if keypress is valid
+ static bool isKeyValid(Object^ sender, Windows::Forms::KeyPressEventArgs^ e, bool isSigned) {
+ 	bool result = true;
+@@ -704,51 +750,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
+ 
+ #pragma region Auto Buffs
+ void MainForm::bBuffAdd_Click(Object^  sender, EventArgs^  e) {
+-	if(String::IsNullOrWhiteSpace(tbBuffInterval->Text)) {
+-		MessageBox::Show("Error: Buff Interval textbox cannot be empty");
++	UInt32 intervalSeconds = 0;
++	if (!UInt32::TryParse(tbBuffInterval->Text, intervalSeconds) || intervalSeconds == 0 || intervalSeconds > 2147483) {
++		MessageBox::Show("Error: Buff interval must be between 1 and 2147483 seconds");
++		return;
++	}
++	if (comboBuffKey->SelectedIndex < 0) {
++		MessageBox::Show("Error: Select a valid buff key");
+ 		return;
+ 	}
+ 	ListViewItem^ lvi = gcnew ListViewItem(gcnew array<String^>{tbBuffName->Text, comboBuffKey->Text, tbBuffInterval->Text});
+-	lvi->Tag = gcnew Macro(keyCollection[comboBuffKey->SelectedIndex], Convert::ToUInt32(tbBuffInterval->Text)*1000, MacroType::BUFFMACRO);
+-	lvi->Checked = true;
++	lvi->Tag = gcnew Macro(keyCollection[comboBuffKey->SelectedIndex], (int)(intervalSeconds * 1000), MacroType::BUFFMACRO);
+ 	lvBuff->Items->Add(lvi);
++	lvi->Checked = true;
+ }
+ 
+ void MainForm::bBuffEnableAll_Click(Object^  sender, EventArgs^  e) {
+ 	for each (ListViewItem^ lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(true);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(true);
+ 		lvi->Checked = true;
+ 	}
+ }
+ 
+ void MainForm::bBuffDisableAll_Click(Object^  sender, EventArgs^  e) {
+ 	for each (ListViewItem ^lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 		lvi->Checked = false;
+ 	}
+ }
+ 
+ void MainForm::bBuffRemove_Click(Object^  sender, EventArgs^  e) {
+ 	for each(ListViewItem^ lvi in lvBuff->SelectedItems) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 		lvBuff->Items->Remove(lvi);
+ 	}
+ }
+ 
+ void MainForm::bBuffClear_Click(Object^  sender, EventArgs^  e) {
+ 	for each(ListViewItem^ lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
+-		lvBuff->Items->Remove(lvi);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 	}
++	lvBuff->Items->Clear();
+ }
+ 
+ void MainForm::lvBuff_ItemChecked(Object^  sender, Windows::Forms::ItemCheckedEventArgs^  e) {
+-	Macro^ macro = (Macro^)e->Item->Tag;
+-	macro->Toggle(e->Item->Checked);
++	Macro^ macro = GetOrCreateBuffMacro(e->Item);
++	if (macro != nullptr)
++		macro->Toggle(e->Item->Checked);
+ }
+ 
+ void MainForm::tbBuffInterval_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
+@@ -968,25 +1024,35 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
+ }
+ 
+ void ClickTeleport() {
++	bool wasLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+ 	while (GlobalRefs::bClickTeleport) {
+-		if (ReadPointer(InputBase, OFS_MouseAnimation) == 12)
++		bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
++		if (isLeftButtonDown && !wasLeftButtonDown && HelperFuncs::IsInGame())
+ 			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbClickTeleport->Text));
++		wasLeftButtonDown = isLeftButtonDown;
++		Sleep(GlobalRefs::clickTeleportDelay);
+ 	}
+ 	ExitThread(0);
+ }
+ 
+ void MouseTeleport() {
+ 	while (GlobalRefs::bMouseTeleport) {
+-		if (ReadPointer(InputBase, OFS_MouseAnimation) == 00)
++		if (HelperFuncs::IsInGame())
+ 			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbMouseTeleport->Text));
++		Sleep(GlobalRefs::mouseTeleportDelay);
+ 	}
+ 	ExitThread(0);
+ }
+ 
+ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+ 	if (this->cbClickTeleport->Checked) {
++		UInt32 delay = 0;
++		if (!UInt32::TryParse(tbClickTeleport->Text, delay) || delay < 10) {
++			MessageBox::Show("Error: Click Teleport interval must be at least 10 ms");
++			this->cbClickTeleport->Checked = false;
++			return;
++		}
++		GlobalRefs::clickTeleportDelay = delay;
+ 		GlobalRefs::bClickTeleport = true;
+ 		NewThread(ClickTeleport);
+ 	}
+@@ -996,6 +1062,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+  
+ void MainForm::cbMouseTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+ 	if (this->cbMouseTeleport->Checked) {
++		UInt32 delay = 0;
++		if (!UInt32::TryParse(tbMouseTeleport->Text, delay) || delay < 10) {
++			MessageBox::Show("Error: Mouse Teleport interval must be at least 10 ms");
++			this->cbMouseTeleport->Checked = false;
++			return;
++		}
++		GlobalRefs::mouseTeleportDelay = delay;
+ 		GlobalRefs::bMouseTeleport = true;
+ 		NewThread(MouseTeleport);
+ 	}
+@@ -2927,4 +3000,4 @@ auto StringPool__GetString = (pfnStringPool__GetString)0x0079E993;	//0x00406455;
+ typedef char**(__stdcall *pfnCItemInfo__GetMapString)(PVOID, PVOID, char*, UINT, const char*);
+ auto CItemInfo__GetMapString = (pfnCItemInfo__GetMapString)0x005CF792;*/
+ 
+-#pragma endregion
+\ No newline at end of file
++#pragma endregion
+diff --git a/Timelapse/MainForm.h b/Timelapse/MainForm.h
+index 7e68e46..24f4000 100644
+--- a/Timelapse/MainForm.h
++++ b/Timelapse/MainForm.h
+@@ -2504,6 +2504,7 @@ public:
+ 			this->lvBuff->TabIndex = 0;
+ 			this->lvBuff->UseCompatibleStateImageBehavior = false;
+ 			this->lvBuff->View = System::Windows::Forms::View::Details;
++			this->lvBuff->ItemChecked += gcnew System::Windows::Forms::ItemCheckedEventHandler(this, &MainForm::lvBuff_ItemChecked);
+ 			// 
+ 			// lvBuffHeaderName
+ 			// 
+@@ -2518,7 +2519,7 @@ public:
+ 			// lvBuffHeaderInterval
+ 			// 
+ 			this->lvBuffHeaderInterval->DisplayIndex = 1;
+-			this->lvBuffHeaderInterval->Text = L"Interval [ms]";
++			this->lvBuffHeaderInterval->Text = L"Interval [s]";
+ 			this->lvBuffHeaderInterval->Width = 80;
+ 			// 
+ 			// tabPage12
+@@ -6789,4 +6790,4 @@ public:
+ private: System::Void HPPotDelay_TextChanged(System::Object^ sender, System::EventArgs^ e) {
+ }
+ };
+-};
+\ No newline at end of file
++};
+diff --git a/Timelapse/Settings.cpp b/Timelapse/Settings.cpp
+index 7dbfe8b..67819a1 100644
+--- a/Timelapse/Settings.cpp
++++ b/Timelapse/Settings.cpp
+@@ -49,28 +49,41 @@ void Settings::Serialize(String^ path, XmlSerializer^ serializer, Object^ object
+ }
+ 
+ void Settings::Serialize(Control^ c, String^ XmlFileName) {
+-	XmlTextWriter^ xmlSerializedForm = gcnew XmlTextWriter(XmlFileName, System::Text::Encoding::Default);
++	XmlTextWriter^ xmlSerializedForm = nullptr;
+ 
+-	xmlSerializedForm->Formatting = Formatting::Indented;
+-	xmlSerializedForm->WriteStartDocument();
+-	xmlSerializedForm->WriteStartElement("Timelapse");
+-
+-	// enumerate all controls on the form, and serialize them as appropriate
+-	AddChildControls(xmlSerializedForm, c);
+-
+-	xmlSerializedForm->WriteEndElement();
+-	xmlSerializedForm->WriteEndDocument();
+-	xmlSerializedForm->Flush();
+-	xmlSerializedForm->Close();
+-
+-	Log::WriteLine("Saved " + XmlFileName);
++	try {
++		String^ directory = Path::GetDirectoryName(XmlFileName);
++		if (!String::IsNullOrWhiteSpace(directory))
++			Directory::CreateDirectory(directory);
++
++		xmlSerializedForm = gcnew XmlTextWriter(XmlFileName, System::Text::Encoding::UTF8);
++		xmlSerializedForm->Formatting = Formatting::Indented;
++		xmlSerializedForm->WriteStartDocument();
++		xmlSerializedForm->WriteStartElement("Timelapse");
++
++		// Enumerate all supported controls on the form.
++		AddChildControls(xmlSerializedForm, c);
++
++		xmlSerializedForm->WriteEndElement();
++		xmlSerializedForm->WriteEndDocument();
++		xmlSerializedForm->Flush();
++		Log::WriteLine("Saved " + XmlFileName);
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Exception occured while saving settings to " + XmlFileName + " : " + ex->Message);
++		MessageBox::Show("Unable to save settings: " + ex->Message, "Timelapse", MessageBoxButtons::OK, MessageBoxIcon::Error);
++	}
++	finally {
++		if (xmlSerializedForm != nullptr)
++			xmlSerializedForm->Close();
++	}
+ }
+ 
+ bool Settings::isExcluded(Control^ ctrl) {
+ 	const auto ctrlName = ctrl->Name;
+ 	if (ctrlName == "lbConsoleLog" || ctrlName == "tbItemFilterSearch" || ctrlName == "tbItemFilterSearch" || ctrlName == "lbItemSearchLog" ||
+ 		ctrlName == "lbMobSearchLog" || ctrlName == "tbMobFilterSearch" || ctrlName == "tbSendPacket" || ctrlName == "tbMapRusherSearch" || 
+-		ctrlName == "lvMapRusherSearch" || ctrlName == "lvBuff")
++		ctrlName == "lvMapRusherSearch")
+ 		return true;
+ 
+ 	return false;
+@@ -80,10 +93,15 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 	for each(Control^ childCtrl in c->Controls) {
+ 		auto ctrlType = childCtrl->GetType();
+ 		auto ctrlName = childCtrl->Name;
++		bool isSerializableControl = ctrlType == ComboBox::typeid || ctrlType == NumericUpDown::typeid ||
++			ctrlType == CheckBox::typeid || ctrlType == TextBox::typeid || ctrlType == ListBox::typeid ||
++			ctrlType == ListView::typeid;
++
++		if (isExcluded(childCtrl))
++			continue;
+ 
+ 		//TODO: save press state of buttons?
+-		if (childCtrl->HasChildren || ctrlType == ComboBox::typeid || ctrlType == NumericUpDown::typeid || ctrlType == CheckBox::typeid || 
+-			ctrlType == TextBox::typeid || ctrlType == ListBox::typeid && c && !isExcluded(childCtrl)) { 
++		if (childCtrl->HasChildren || isSerializableControl) {
+ 			// serialize this control
+ 			xmlSerializedForm->WriteStartElement("Control");
+ 			xmlSerializedForm->WriteAttributeString("Name", ctrlName);
+@@ -108,9 +126,24 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 					xmlSerializedForm->WriteAttributeString(listBoxItemNmbStr, listBoxItemStr);
+ 				}
+ 			}
++			else if (ctrlType == ListView::typeid) {
++				ListView^ listView = safe_cast<ListView^>(childCtrl);
++				int itemCnt = listView->Items->Count;
++				xmlSerializedForm->WriteAttributeString("ListViewItemCnt", itemCnt.ToString());
++
++				for (int i = 0; i < itemCnt; i++) {
++					ListViewItem^ item = listView->Items[i];
++					String^ itemPrefix = "Item" + i.ToString();
++					xmlSerializedForm->WriteAttributeString(itemPrefix + "Checked", item->Checked.ToString());
++					xmlSerializedForm->WriteAttributeString(itemPrefix + "SubItemCnt", item->SubItems->Count.ToString());
++
++					for (int j = 0; j < item->SubItems->Count; j++)
++						xmlSerializedForm->WriteAttributeString(itemPrefix + "SubItem" + j.ToString(), item->SubItems[j]->Text);
++				}
++			}
+ 
+ 			// see if this control has any children, and if so, serialize them
+-			if (childCtrl->HasChildren && ctrlType != NumericUpDown::typeid)
++			if (childCtrl->HasChildren && !isSerializableControl)
+ 				AddChildControls(xmlSerializedForm, childCtrl);
+ 
+ 			xmlSerializedForm->WriteEndElement(); // Control
+@@ -124,7 +157,7 @@ void Settings::Deserialize(Control^ c, String^ XmlFileName) {
+ 			XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
+ 			xmlSerializedForm->Load(XmlFileName);
+ 
+-			XmlNode^ topLevel = xmlSerializedForm->ChildNodes[1];
++			XmlNode^ topLevel = xmlSerializedForm->DocumentElement;
+ 			for each(XmlNode^ n in topLevel->ChildNodes)
+ 				SetControlProperties(safe_cast<Control^>(c), n);
+ 		}
+@@ -140,6 +173,8 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+ 		String^ ctrlName = n->Attributes["Name"]->Value;
+ 		// find the control
+ 		auto ctrl = currentCtrl->Controls->Find(ctrlName, true);
++		if (ctrl == nullptr || ctrl->Length == 0)
++			return;
+ 
+ 		// the right type too
+ 		if (n->Attributes["SelectedIndex"])
+@@ -153,14 +188,35 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+ 		else if (n->Attributes["ItemCnt"]) {
+ 			int itemCnt = Convert::ToInt32(n->Attributes["ItemCnt"]->Value);
+ 			auto collection = safe_cast<ListBox^>(ctrl[0])->Items;
++			collection->Clear();
+ 
+-			if (itemCnt < 1) return;
+ 			for (int i = 0; i < itemCnt; i++) {
+ 				String^ indexedListBoxItemStr = ctrlName + "Item" + i.ToString();
+ 				String^ itemToAddStr = Convert::ToString(n->Attributes[indexedListBoxItemStr]->Value);
+ 				collection->Add(itemToAddStr);
+ 			}
+ 		}
++		else if (n->Attributes["ListViewItemCnt"]) {
++			ListView^ listView = safe_cast<ListView^>(ctrl[0]);
++			int itemCnt = Convert::ToInt32(n->Attributes["ListViewItemCnt"]->Value);
++			listView->BeginUpdate();
++			listView->Items->Clear();
++
++			for (int i = 0; i < itemCnt; i++) {
++				String^ itemPrefix = "Item" + i.ToString();
++				int subItemCnt = Convert::ToInt32(n->Attributes[itemPrefix + "SubItemCnt"]->Value);
++				array<String^>^ row = gcnew array<String^>(subItemCnt);
++
++				for (int j = 0; j < subItemCnt; j++)
++					row[j] = Convert::ToString(n->Attributes[itemPrefix + "SubItem" + j.ToString()]->Value);
++
++				ListViewItem^ item = gcnew ListViewItem(row);
++				listView->Items->Add(item);
++				item->Checked = Convert::ToBoolean(n->Attributes[itemPrefix + "Checked"]->Value);
++			}
++
++			listView->EndUpdate();
++		}
+ 
+ 		// if n has any children that are controls, deserialize them as well
+ 		if (n->HasChildNodes && ctrl[0]->HasChildren) {
+@@ -180,6 +236,7 @@ String^ Settings::GetSettingsPath() {
+ 
+ 	try {
+ 		String^ TimelapseFolderPath = Path::Combine(AppDataFolder, "Timelapse");
++		Directory::CreateDirectory(TimelapseFolderPath);
+ 		SettingsFilePath = Path::Combine(TimelapseFolderPath, "Settings.xml");
+ 	}
+ 	catch (Exception^ ex) {
+@@ -188,4 +245,4 @@ String^ Settings::GetSettingsPath() {
+ 
+ 	Log::WriteLine("Generated path to Timelapse settings file at" + ": " + SettingsFilePath);
+ 	return SettingsFilePath;
+-}
+\ No newline at end of file
++}
