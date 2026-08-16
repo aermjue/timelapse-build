@@ -1,0 +1,1656 @@
+diff --git a/Timelapse/Log.cpp b/Timelapse/Log.cpp
+index 3d84ec7..2c2d0ae 100644
+--- a/Timelapse/Log.cpp
++++ b/Timelapse/Log.cpp
+@@ -31,6 +31,7 @@ String^ Log::GetLogPath() {
+ 
+ 	try {
+ 		String^ TimelapseFolderPath = Path::Combine(AppDataFolder, "Timelapse");
++		Directory::CreateDirectory(TimelapseFolderPath);
+ 		LogsFilePath = Path::Combine(TimelapseFolderPath, "Log.txt");
+ 	} 
+ 	catch (Exception^){}
+diff --git a/Timelapse/Macro.h b/Timelapse/Macro.h
+index 023ca14..d484aca 100644
+--- a/Timelapse/Macro.h
++++ b/Timelapse/Macro.h
+@@ -25,20 +25,24 @@ typedef struct tag_KEYDATA {
+ 	BYTE flagUp : 1;
+ } KEYDATA;
+ 
+-static DWORD createKeyData(int Key) {
+-	KEYDATA kd;
+-	memset(&kd, 0, sizeof(KEYDATA));
+-	kd.keyRepeatCnt = 1;
+-	kd.keyScanCode = static_cast<BYTE>(MapVirtualKey(Key, 0));
+-	kd.flagExtendedKey = 0;
+-	kd.Reserved = 0;
+-	kd.flagAltDown = 0; // this has to be 0 else no lumping of messages
+-	kd.flagRepeat = 1; // this is necessary for proper execution in maplestory
+-	kd.flagUp = 0;
+-	DWORD dwVal;
+-	memcpy(&dwVal, &kd, sizeof(DWORD));
++static bool isExtendedKey(int key) {
++	switch (key) {
++		case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
++		case VK_PRIOR: case VK_NEXT: case VK_LEFT: case VK_RIGHT:
++		case VK_UP: case VK_DOWN: case VK_RCONTROL: case VK_RMENU:
++			return true;
++		default:
++			return false;
++	}
++}
+ 
+-	return dwVal;
++static LPARAM createKeyData(int key, bool keyUp) {
++	LPARAM keyData = 1 | (MapVirtualKey(key, MAPVK_VK_TO_VSC) << 16);
++	if (isExtendedKey(key))
++		keyData |= (1 << 24);
++	if (keyUp)
++		keyData |= 0xC0000000;
++	return keyData;
+ }
+ 
+ ref struct KeyMacro {
+@@ -53,10 +57,10 @@ ref struct KeyMacro {
+ 	// basically this represents magical keyboard which repeatedly presses keys down but doesn't need any kind of going up with keys
+ 	// thus this non-physical keyboard will cause certain skills like charge abilities to be permanently stuck charging
+ 	static void SendKey(int Key) {
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("SendKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 		}
+ 	}
+ 
+@@ -66,35 +70,33 @@ ref struct KeyMacro {
+ 	// then OS should lump these into one message and process it much faster
+ 	static void SpamSendKey(int Key, int times) {	
+ 		for (int i = 0; i < times; i++) {
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 			 if (DBG_Macro) {
+ 				 Log::WriteLineToConsole("SpamSendKey: ERROR failed to post message to process!");
+-				 Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++				 Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 			 }
+ 		}
+ 	}
+ 
+ 	// This simulates repeated bashing of a keystroke on a regular physical keyboard
+ 	static void PressKey(int Key) {
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("PressKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key, false));
+ 		}
+-		//WM_CHAR
+-		PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key));
++		PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key, true));
+ 		if (DBG_Macro) {
+ 			Log::WriteLineToConsole("PressKey: ERROR failed to post message to process!");
+-			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYDOWN " + "KeyData: " + createKeyData(Key));
++			Log::WriteLineToConsole("Key: " + Key.ToString() + " MSG: WM_KEYUP " + "KeyData: " + createKeyData(Key, true));
+ 		}
+ 	}
+ 
+ 	// unused for now
+ 	static void SpamPressKey(int Key, int times) {
+ 		for (int i = 0; i < times; i++) {
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key));
+-			//WM_CHAR
+-			PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYDOWN, Key, createKeyData(Key, false));
++			PostMessage(GlobalVars::mapleWindow, WM_KEYUP, Key, createKeyData(Key, true));
+ 		}
+ 	}
+ };
+@@ -104,17 +106,42 @@ public:
+ 	static cliext::priority_queue<KeyMacro^>^ macroQueue = gcnew cliext::priority_queue<KeyMacro^>();
+ 	static bool closeMacroQueue = false;
+ 
++	static void Push(KeyMacro^ key) {
++		Threading::Monitor::Enter(macroQueue);
++		try {
++			macroQueue->push(key);
++		}
++		finally {
++			Threading::Monitor::Exit(macroQueue);
++		}
++	}
++
++	static bool TryPop(KeyMacro^% key) {
++		key = nullptr;
++		Threading::Monitor::Enter(macroQueue);
++		try {
++			if (macroQueue->empty())
++				return false;
++			key = macroQueue->top();
++			macroQueue->pop();
++			return true;
++		}
++		finally {
++			Threading::Monitor::Exit(macroQueue);
++		}
++	}
++
+ 	static void MacroQueueWorker() {
+ 		if (GlobalVars::mapleWindow == nullptr) 
+ 			GlobalVars::mapleWindow = GetMSWindowHandle();
+ 
+ 		while(!closeMacroQueue) {
+-			if (macroQueue == nullptr || macroQueue->empty())
++			KeyMacro^ key = nullptr;
++			if (!TryPop(key)) {
++				Threading::Thread::Sleep(1);
+ 				continue;
+-			
+-			Threading::Monitor::Enter(macroQueue);
+-			KeyMacro ^key = macroQueue->top();
+-			macroQueue->pop();		
++			}
++
+ 			if (DBG_Macro) Log::WriteLineToConsole("MacroQueueSizeAfterPop: " + macroQueue->size());
+ 
+ 			switch(key->macroType) {
+@@ -142,13 +169,13 @@ public:
+ 						KeyMacro::SpamSendKey(key->keyCode, 2);
+ 					break;
+ 			}
+-			Threading::Monitor::Exit(macroQueue);
+ 		}
+ 	}
+ };
+ 
+ ref class Macro {
+ 	Threading::Timer^ timer;
++	bool enabled;
+ 
+ 	void SendKeyMacroToQueue() {
+ 		if (DBG_Macro) Log::WriteLineToConsole("Entered SendKeyToQueue");
+@@ -161,7 +188,7 @@ ref class Macro {
+ 			// TODO: buffs need better handling
+ 			case MacroType::BUFFMACRO:		
+ 				if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-				PriorityQueue::macroQueue->push(keyMacro);
++				PriorityQueue::Push(keyMacro);
+ 			break;
+ 			case MacroType::HPPOTMACRO:
+ 				if (MacrosEnabled::bMacroHP && HelperFuncs::IsInGame()) {
+@@ -171,7 +198,7 @@ ref class Macro {
+ 
+ 					if (hpCntCurrent < hpCntDrinkLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -183,7 +210,7 @@ ref class Macro {
+ 
+ 					if (mpCntCurrent < mpCntDrinkLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -195,7 +222,7 @@ ref class Macro {
+ 
+ 					if (itemCntCurrent > itemCntLootLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -207,7 +234,7 @@ ref class Macro {
+ 
+ 					if (mobCntCurrent > mobCntAttackLimit) {
+ 						if (DBG_Macro) Log::WriteLineToConsole("Pushing macro to queue: " + MacroTypeToStr(keyMacro->macroType));
+-						PriorityQueue::macroQueue->push(keyMacro);
++						PriorityQueue::Push(keyMacro);
+ 					}
+ 				}
+ 			break;
+@@ -250,6 +277,7 @@ public:
+ 		this->keyCode = keyCode;
+ 		this->delay = delay;
+ 		this->macroType = macro;
++		this->enabled = false;
+ 		if (DBG_Macro) DebugMacro(this);
+ 		Threading::TimerCallback^ TimerDelegate = gcnew Threading::TimerCallback(this, &Macro::TimerElapsed);
+ 		timer = gcnew Threading::Timer(TimerDelegate, nullptr, Threading::Timeout::Infinite, delay);
+@@ -259,9 +287,13 @@ public:
+ 	// TODO: if buffMacro check if i have it present if not cast it for first time
+ 	void Toggle(bool enable) {	
+ 		if (enable) {
++			if (!enabled && macroType == MacroType::BUFFMACRO)
++				SendKeyMacroToQueue();
++			enabled = true;
+ 			timer->Change(delay, delay);			
+ 		}				
+ 		else {
++			enabled = false;
+ 			timer->Change(Threading::Timeout::Infinite, Threading::Timeout::Infinite);					
+ 		}
+ 	}
+diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
+index 3c102b2..c09c96a 100644
+--- a/Timelapse/MainForm.cpp
++++ b/Timelapse/MainForm.cpp
+@@ -16,6 +16,7 @@ using namespace Timelapse;
+ 
+ //Forward declarations
+ void AutoLogin();
++void ProcessAutoLogin();
+ static void loadMaps(); 
+ static void mapRush(int destMapID); 
+ 
+@@ -24,6 +25,7 @@ ref struct GlobalRefs {
+ 	static Macro ^macroHP, ^macroMP, ^macroAttack, ^macroLoot;
+ 	static bool isChangingField = false, isMapRushing = false;
+ 	static bool bClickTeleport = false, bMouseTeleport = false, bTeleport = false, bKami = false, bKamiLoot = false;
++	static UINT clickTeleportDelay = 100, mouseTeleportDelay = 100;
+ 	static bool bWallVac = false, bDupeX = false, bMMC = false, bUEMI = false;
+ 	static UINT cccsTimerTickCount = 0;
+ 	static bool isDragging = false, isEmbedding = false;
+@@ -32,6 +34,9 @@ ref struct GlobalRefs {
+ 	static double formOpacity;
+ 	static Generic::List<MapData^>^ maps;
+ 	static bool bSendPacketLog = false, bRecvPacketLog = false;
++	static int autoLoginPhase = 0, autoLoginLastStep = -1, autoLoginLastScreen = -1, autoLoginAttempts = 0;
++	static DateTime autoLoginNextAction;
++	static String^ autoLoginLastStatus = nullptr;
+ };
+ 
+ #pragma region General Form
+@@ -164,12 +169,185 @@ void MainForm::pnlFull_MouseMove(Object^  sender, Windows::Forms::MouseEventArgs
+ #pragma endregion
+ 
+ #pragma region ToolStrip
++static String^ GetSettingsProfilesDirectory() {
++	try {
++		String^ documentsDirectory = Environment::GetFolderPath(Environment::SpecialFolder::MyDocuments);
++		if (!String::IsNullOrWhiteSpace(documentsDirectory)) {
++			String^ profilesDirectory = Path::Combine(documentsDirectory, "Timelapse Profiles");
++			Directory::CreateDirectory(profilesDirectory);
++			return profilesDirectory;
++		}
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Unable to create settings profiles in Documents: " + ex->Message);
++	}
++
++	String^ fallbackDirectory = Path::Combine(Path::GetDirectoryName(Settings::GetSettingsPath()), "Profiles");
++	Directory::CreateDirectory(fallbackDirectory);
++	return fallbackDirectory;
++}
++
++static String^ PromptForSettingsProfileName(Form^ owner) {
++	String^ profilesDirectory = GetSettingsProfilesDirectory();
++	Form^ dialog = gcnew Form();
++	dialog->Text = "Save Timelapse Settings Profile";
++	dialog->FormBorderStyle = FormBorderStyle::FixedDialog;
++	dialog->StartPosition = FormStartPosition::CenterParent;
++	dialog->ClientSize = System::Drawing::Size(470, 155);
++	dialog->MaximizeBox = false;
++	dialog->MinimizeBox = false;
++	dialog->ShowIcon = false;
++	dialog->ShowInTaskbar = false;
++
++	Label^ nameLabel = gcnew Label();
++	nameLabel->Text = "Profile name:";
++	nameLabel->Location = Point(15, 20);
++	nameLabel->AutoSize = true;
++	dialog->Controls->Add(nameLabel);
++
++	TextBox^ nameBox = gcnew TextBox();
++	nameBox->Location = Point(110, 17);
++	nameBox->Size = System::Drawing::Size(340, 23);
++	nameBox->Text = "farming";
++	nameBox->SelectAll();
++	dialog->Controls->Add(nameBox);
++
++	Label^ pathLabel = gcnew Label();
++	pathLabel->Text = "Saved in: " + profilesDirectory;
++	pathLabel->Location = Point(15, 58);
++	pathLabel->Size = System::Drawing::Size(435, 34);
++	pathLabel->AutoEllipsis = true;
++	dialog->Controls->Add(pathLabel);
++
++	Button^ saveButton = gcnew Button();
++	saveButton->Text = "Save";
++	saveButton->Location = Point(285, 108);
++	saveButton->Size = System::Drawing::Size(78, 28);
++	saveButton->DialogResult = System::Windows::Forms::DialogResult::OK;
++	dialog->Controls->Add(saveButton);
++
++	Button^ cancelButton = gcnew Button();
++	cancelButton->Text = "Cancel";
++	cancelButton->Location = Point(372, 108);
++	cancelButton->Size = System::Drawing::Size(78, 28);
++	cancelButton->DialogResult = System::Windows::Forms::DialogResult::Cancel;
++	dialog->Controls->Add(cancelButton);
++
++	dialog->AcceptButton = saveButton;
++	dialog->CancelButton = cancelButton;
++	dialog->ActiveControl = nameBox;
++	if (dialog->ShowDialog(owner) != System::Windows::Forms::DialogResult::OK)
++		return nullptr;
++
++	String^ profileName = nameBox->Text->Trim();
++	if (profileName->EndsWith(".xml", StringComparison::OrdinalIgnoreCase))
++		profileName = profileName->Substring(0, profileName->Length - 4)->Trim();
++
++	if (String::IsNullOrWhiteSpace(profileName) || profileName->IndexOfAny(Path::GetInvalidFileNameChars()) >= 0 || profileName->EndsWith(".")) {
++		MessageBox::Show(owner, "Please enter a valid profile name.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Warning);
++		return nullptr;
++	}
++
++	String^ settingsPath = Path::Combine(profilesDirectory, profileName + ".xml");
++	if (File::Exists(settingsPath) && MessageBox::Show(owner, "The profile already exists. Overwrite it?\n" + settingsPath,
++		"Timelapse Settings", MessageBoxButtons::YesNo, MessageBoxIcon::Question) != System::Windows::Forms::DialogResult::Yes)
++		return nullptr;
++
++	return settingsPath;
++}
++
++static String^ PromptForSettingsProfile(Form^ owner) {
++	String^ profilesDirectory = GetSettingsProfilesDirectory();
++	Generic::List<String^>^ profilePaths = gcnew Generic::List<String^>();
++	Form^ dialog = gcnew Form();
++	dialog->Text = "Open Timelapse Settings Profile";
++	dialog->FormBorderStyle = FormBorderStyle::FixedDialog;
++	dialog->StartPosition = FormStartPosition::CenterParent;
++	dialog->ClientSize = System::Drawing::Size(470, 350);
++	dialog->MaximizeBox = false;
++	dialog->MinimizeBox = false;
++	dialog->ShowIcon = false;
++	dialog->ShowInTaskbar = false;
++
++	Label^ pathLabel = gcnew Label();
++	pathLabel->Text = "Profiles in: " + profilesDirectory;
++	pathLabel->Location = Point(15, 15);
++	pathLabel->Size = System::Drawing::Size(435, 34);
++	pathLabel->AutoEllipsis = true;
++	dialog->Controls->Add(pathLabel);
++
++	ListBox^ profileList = gcnew ListBox();
++	profileList->Location = Point(15, 55);
++	profileList->Size = System::Drawing::Size(435, 235);
++	dialog->Controls->Add(profileList);
++
++	String^ defaultSettingsPath = Settings::GetSettingsPath();
++	if (File::Exists(defaultSettingsPath)) {
++		profileList->Items->Add("Default (legacy Settings.xml)");
++		profilePaths->Add(defaultSettingsPath);
++	}
++
++	try {
++		for each(String^ profilePath in Directory::GetFiles(profilesDirectory, "*.xml")) {
++			profileList->Items->Add(Path::GetFileNameWithoutExtension(profilePath));
++			profilePaths->Add(profilePath);
++		}
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Unable to list settings profiles: " + ex->Message);
++		MessageBox::Show(owner, "Settings profiles could not be listed. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
++		return nullptr;
++	}
++
++	if (profileList->Items->Count == 0) {
++		MessageBox::Show(owner, "No saved profiles were found. Use Save Settings first.\n\nProfile folder:\n" + profilesDirectory,
++			"Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++		return nullptr;
++	}
++	profileList->SelectedIndex = 0;
++
++	Button^ openButton = gcnew Button();
++	openButton->Text = "Open";
++	openButton->Location = Point(285, 305);
++	openButton->Size = System::Drawing::Size(78, 28);
++	openButton->DialogResult = System::Windows::Forms::DialogResult::OK;
++	dialog->Controls->Add(openButton);
++
++	Button^ cancelButton = gcnew Button();
++	cancelButton->Text = "Cancel";
++	cancelButton->Location = Point(372, 305);
++	cancelButton->Size = System::Drawing::Size(78, 28);
++	cancelButton->DialogResult = System::Windows::Forms::DialogResult::Cancel;
++	dialog->Controls->Add(cancelButton);
++
++	dialog->AcceptButton = openButton;
++	dialog->CancelButton = cancelButton;
++	if (dialog->ShowDialog(owner) != System::Windows::Forms::DialogResult::OK || profileList->SelectedIndex < 0)
++		return nullptr;
++
++	return profilePaths[profileList->SelectedIndex];
++}
++
+ void MainForm::loadSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+-	Settings::Deserialize(this, Settings::GetSettingsPath());
++	String^ settingsPath = PromptForSettingsProfile(this);
++	if (String::IsNullOrWhiteSpace(settingsPath))
++		return;
++
++	if (Settings::Deserialize(this, settingsPath))
++		MessageBox::Show("Settings loaded successfully from:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++	else
++		MessageBox::Show("The settings file exists but could not be loaded. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
+ }
+ 
+ void MainForm::saveSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+-	Settings::Serialize(this, Settings::GetSettingsPath());
++	String^ settingsPath = PromptForSettingsProfileName(this);
++	if (String::IsNullOrWhiteSpace(settingsPath))
++		return;
++
++	if (Settings::Serialize(this, settingsPath))
++		MessageBox::Show("Settings saved successfully to:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++	else
++		MessageBox::Show("Settings could not be saved. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
+ }
+ 
+ void MainForm::closeMapleStoryToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+@@ -374,6 +552,49 @@ void MainForm::GUITimer_Tick(Object^  sender, EventArgs^  e) {
+ 		lbPortalCount->Text = PointerFuncs::getPortalCount();
+ 		lbNPCCount->Text = PointerFuncs::getNPCCount();
+ 	}
++	else {
++		int loginStep = -1;
++		int loginScreen = -1;
++		String^ sessionText = "Disconnected / waiting";
++		if (TryGetMapleLoginState(loginStep, loginScreen)) {
++			if (loginScreen == 255)
++				sessionText = "Login screen";
++			else if (loginScreen == 1)
++				sessionText = "Logging in...";
++			else if (loginStep == 1)
++				sessionText = "Selecting world / channel";
++			else if (loginStep == 2)
++				sessionText = "Selecting character";
++		}
++
++		// Never leave stale character/map data visible after a disconnect.
++		lbMapName->Text = sessionText;
++		lbCharName->Text = "--";
++		lbLevel->Text = "--";
++		lbJob->Text = "--";
++		lbHP->Text = "--";
++		lbMP->Text = "--";
++		lbEXP->Text = "--";
++		lbMesos->Text = "--";
++		lbWorld->Text = "--";
++		lbChannel->Text = "--";
++		lbMapID->Text = "--";
++		lbWalls->Text = "--";
++		lbCharFoothold->Text = "--";
++		lbCharAnimation->Text = "--";
++		lbCharPos->Text = "--";
++		lbMousePos->Text = "--";
++		lbAttackCount->Text = "0";
++		lbBuffCount->Text = "0";
++		lbBreathCount->Text = "0";
++		lbPeopleCount->Text = "0";
++		lbMobCount->Text = "0";
++		lbItemCount->Text = "0";
++		lbPortalCount->Text = "0";
++		lbNPCCount->Text = "0";
++	}
++
++	ProcessAutoLogin();
+ }
+ #pragma endregion
+ 
+@@ -393,112 +614,324 @@ void MainForm::lbConsoleLog_KeyDown(System::Object^  sender, System::Windows::Fo
+ 
+ #pragma region Auto Login
+ 
+-//TODO: Get Real Mac Address
+-String^ GetMac(bool generateFake) {
+-	String^ macAddress = "";
++enum AutoLoginPhase {
++	AUTOLOGIN_IDLE = 0,
++	AUTOLOGIN_USERNAME = 10,
++	AUTOLOGIN_PASSWORD = 11,
++	AUTOLOGIN_CONNECT = 12,
++	AUTOLOGIN_WAIT_LOGIN = 13,
++	AUTOLOGIN_WORLD = 20,
++	AUTOLOGIN_CHANNEL = 21,
++	AUTOLOGIN_WAIT_CHANNEL = 22,
++	AUTOLOGIN_CHARACTER = 30,
++	AUTOLOGIN_PIC = 31,
++	AUTOLOGIN_WAIT_CHARACTER = 32
++};
+ 
+-	if(generateFake) {
+-		for(int i = 0; i < 12; i++) {
+-			if (i != 0 && i % 2 == 0)
+-				macAddress += "-";
+-			macAddress += IntToHex(rand() % 16);
+-		}
+-	}
++static void SetAutoLoginStatus(String^ status) {
++	if (String::IsNullOrWhiteSpace(status) || status == GlobalRefs::autoLoginLastStatus)
++		return;
+ 
+-	return macAddress;
++	GlobalRefs::autoLoginLastStatus = status;
++	Log::WriteLineToConsole("Auto Login: " + status);
+ }
+ 
+-//TODO: Get Real HWID (CLogin::GetLocalMacAddressWithHDDSerialNo())
+-String^ GetHWID(bool generateFake, String^ mac) {
+-	String^ hwid = "";
++static void ResetAutoLoginState(bool runImmediately) {
++	GlobalRefs::autoLoginPhase = AUTOLOGIN_IDLE;
++	GlobalRefs::autoLoginLastStep = -1;
++	GlobalRefs::autoLoginLastScreen = -1;
++	GlobalRefs::autoLoginAttempts = 0;
++	GlobalRefs::autoLoginNextAction = runImmediately ? DateTime::Now : DateTime::Now.AddSeconds(2);
++}
+ 
+-	if(generateFake) {
+-		mac = mac->Replace("-", "");
+-		hwid += mac;
+-		hwid += "_";
+-		for (int i = 0; i < 8; i++)
+-			hwid += IntToHex(rand() % 16);
+-	}
++static bool FocusMapleWindow() {
++	if (GlobalVars::mapleWindow == nullptr || !IsWindow(GlobalVars::mapleWindow))
++		GlobalVars::mapleWindow = GetMSWindowHandle();
++	if (GlobalVars::mapleWindow == nullptr || !IsWindow(GlobalVars::mapleWindow))
++		return false;
+ 
+-	return hwid; 
++	if (IsIconic(GlobalVars::mapleWindow))
++		ShowWindow(GlobalVars::mapleWindow, SW_RESTORE);
++	SetForegroundWindow(GlobalVars::mapleWindow);
++	return true;
+ }
+ 
+-void SendLoginPacket(String^ username, String^ password) {
+-	String^ packet = "";
+-	writeBytes(packet, gcnew array<BYTE>{0x01, 0x00}); //Login OpCode
+-	writeString(packet, username); //Username
+-	writeString(packet, password); //Password
+-	writeBytes(packet, gcnew array<BYTE>{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); //Unknown bytes
+-	writeBytes(packet, gcnew array<BYTE>{0x00, 0x00, 0x00, 0x00}); //Account id? setting to 0 for now
+-	//rest of packet unused for now
+-	SendPacket(packet);
++static void SendPhysicalKey(WORD virtualKey, bool keyUp) {
++	INPUT input;
++	ZeroMemory(&input, sizeof(INPUT));
++	input.type = INPUT_KEYBOARD;
++	input.ki.wVk = virtualKey;
++	input.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0;
++	SendInput(1, &input, sizeof(INPUT));
+ }
+ 
+-void SendCharListRequestPacket(int world, int channel) {
+-	String^ packet = "";
+-	writeBytes(packet, gcnew array<BYTE>{0x05, 0x00}); //Character List Request OpCode
+-	writeByte(packet, 0x02); //Unknown byte
+-	writeByte(packet, world); //World
+-	writeByte(packet, channel); //Channel
+-	writeBytes(packet, gcnew array<BYTE>{0x7F, 0x00, 0x00, 0x01}); //Unknown bytes
+-	SendPacket(packet);
++static void TapPhysicalKey(WORD virtualKey) {
++	SendPhysicalKey(virtualKey, false);
++	SendPhysicalKey(virtualKey, true);
+ }
+ 
+-void SendSelectCharPacket(int character, bool existsPIC) {
+-	String^ packet = "";
+-	String^ macAddress = GetMac(true);
++static void TapPhysicalKeyRepeated(WORD virtualKey, int count) {
++	for (int i = 0; i < count; i++) {
++		TapPhysicalKey(virtualKey);
++		Sleep(12);
++	}
++}
+ 
+-	if(existsPIC) {
+-		String^ PIC = MainForm::TheInstance->tbAutoLoginPIC->Text;
++static bool ClickMapleClientPoint(int clientX, int clientY, bool doubleClick) {
++	if (!FocusMapleWindow())
++		return false;
+ 
+-		writeBytes(packet, gcnew array<BYTE>{0x1E, 0x00}); //Character Select (With PIC) OpCode
+-		writeString(packet, PIC); //PIC
+-		writeInt(packet, character); //Character Number (starts with 1)
+-		writeString(packet, macAddress); //Mac Address
+-		writeString(packet, GetHWID(true, macAddress)); //HWID
+-		SendPacket(packet);
++	POINT point = { clientX, clientY };
++	if (!ClientToScreen(GlobalVars::mapleWindow, &point))
++		return false;
++
++	MouseInput::Mouse mouse;
++	mouse.moveTo(point.x, point.y, false, false);
++	Sleep(40);
++	if (doubleClick)
++		mouse.doubleLeftClick();
++	else
++		mouse.leftClick();
++	return true;
++}
++
++static void ClearFocusedLoginField() {
++	SendPhysicalKey(VK_CONTROL, false);
++	TapPhysicalKey('A');
++	SendPhysicalKey(VK_CONTROL, true);
++	TapPhysicalKey(VK_BACK);
++}
++
++static bool TypeCredentialText(String^ text) {
++	if (String::IsNullOrEmpty(text))
++		return false;
++
++	for each (wchar_t character in text) {
++		SHORT key = VkKeyScanW(character);
++		if (key == -1) {
++			// WM_CHAR is a useful fallback for a character that the active
++			// keyboard layout cannot represent directly.
++			PostMessage(GlobalVars::mapleWindow, WM_CHAR, character, 1);
++			continue;
++		}
++
++		BYTE virtualKey = LOBYTE(key);
++		BYTE modifiers = HIBYTE(key);
++		if (modifiers & 1) SendPhysicalKey(VK_SHIFT, false);
++		if (modifiers & 2) SendPhysicalKey(VK_CONTROL, false);
++		if (modifiers & 4) SendPhysicalKey(VK_MENU, false);
++
++		TapPhysicalKey(virtualKey);
++
++		if (modifiers & 4) SendPhysicalKey(VK_MENU, true);
++		if (modifiers & 2) SendPhysicalKey(VK_CONTROL, true);
++		if (modifiers & 1) SendPhysicalKey(VK_SHIFT, true);
++		Sleep(18);
+ 	}
+-	else {
+-		writeBytes(packet, gcnew array<BYTE>{0x13, 0x00}); //Character Select (Without PIC) OpCode
+-		writeInt(packet, character); //Character Number (starts with 1)
+-		writeString(packet, macAddress); //Mac Address
+-		writeString(packet, GetHWID(true, macAddress)); //HWID
+-		SendPacket(packet);
++
++	return true;
++}
++
++static int GetComboIndex(ComboBox^ combo) {
++	if (combo == nullptr)
++		return 0;
++	if (combo->SelectedIndex >= 0)
++		return combo->SelectedIndex;
++
++	String^ current = combo->Text == nullptr ? String::Empty : combo->Text->Trim();
++	int numeric = 0;
++	if (Int32::TryParse(current, numeric) && numeric > 0)
++		return numeric - 1;
++
++	for (int i = 0; i < combo->Items->Count; i++) {
++		if (String::Equals(combo->Items[i]->ToString()->Trim(), current, StringComparison::OrdinalIgnoreCase))
++			return i;
+ 	}
++	return 0;
++}
++
++static void SelectGridItemByKeyboard(int index, int columns) {
++	if (!FocusMapleWindow())
++		return;
++
++	index = Math::Max(0, index);
++	columns = Math::Max(1, columns);
++
++	// Drive selection to the top-left first. This works with both the stock
++	// v83 grid and single-world private-server screens.
++	TapPhysicalKeyRepeated(VK_LEFT, 6);
++	TapPhysicalKeyRepeated(VK_UP, 6);
++	TapPhysicalKeyRepeated(VK_RIGHT, index % columns);
++	TapPhysicalKeyRepeated(VK_DOWN, index / columns);
++	TapPhysicalKey(VK_RETURN);
+ }
+ 
+-//Only works for HeavenMS as of now, maybe on other private servers that doesn't check the validity of the fake hwid/mac address in the packets
+ void AutoLogin() {
+-	if (*(BYTE*)(*(ULONG*)LoginBase + OFS_LoginScreen) == 255) {
+-		Log::WriteLineToConsole("AutoLogin: Logging in...");
+-		String^ usernameStr = MainForm::TheInstance->tbAutoLoginUsername->Text;
+-		String^ passwordStr = MainForm::TheInstance->tbAutoLoginPassword->Text;
+-		SendLoginPacket(usernameStr, passwordStr);
+-		Sleep(2000);
++	ResetAutoLoginState(true);
++}
++
++void ProcessAutoLogin() {
++	MainForm^ form = MainForm::TheInstance;
++	if (form == nullptr || !form->cbAutoLogin->Checked)
++		return;
+ 
+-		int world = MainForm::TheInstance->comboAutoLoginWorld->SelectedIndex;
+-		int channel = MainForm::TheInstance->comboAutoLoginChannel->SelectedIndex; 
+-		SendCharListRequestPacket(world, channel);
+-		Sleep(2000);
++	if (HelperFuncs::IsInGame()) {
++		if (GlobalRefs::autoLoginPhase != AUTOLOGIN_IDLE || GlobalRefs::autoLoginAttempts > 0)
++			SetAutoLoginStatus("character connected");
++		ResetAutoLoginState(false);
++		return;
++	}
+ 
+-		int character = MainForm::TheInstance->comboAutoLoginCharacter->SelectedIndex + 1;
+-		bool existsPIC = MainForm::TheInstance->cbAutoLoginPic->Checked;
+-		SendSelectCharPacket(character, existsPIC);
+-		Log::WriteLineToConsole("AutoLogin: Login Completed");
++	String^ username = form->tbAutoLoginUsername->Text == nullptr ? String::Empty : form->tbAutoLoginUsername->Text->Trim();
++	String^ password = form->tbAutoLoginPassword->Text == nullptr ? String::Empty : form->tbAutoLoginPassword->Text;
++	if (String::IsNullOrEmpty(username) || String::IsNullOrEmpty(password)) {
++		SetAutoLoginStatus("waiting for username and password");
++		return;
+ 	}
+-}
+ 
+-void SetLoginHooks(bool enable) {
+-	Hooks::CLogin__OnRecommendWorldMessage_Hook(true);
++	int loginStep = -1;
++	int loginScreen = -1;
++	if (!TryGetMapleLoginState(loginStep, loginScreen)) {
++		SetAutoLoginStatus("waiting for the client login state");
++		return;
++	}
+ 
+-	if (!enable) {
+-		MessageBox::Show("False!");
+-		Hooks::CLogin__OnRecommendWorldMessage_Hook(false);
++	bool stateChanged = loginStep != GlobalRefs::autoLoginLastStep || loginScreen != GlobalRefs::autoLoginLastScreen;
++	if (stateChanged) {
++		GlobalRefs::autoLoginLastStep = loginStep;
++		GlobalRefs::autoLoginLastScreen = loginScreen;
++
++		if (loginScreen == 255) {
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_USERNAME;
++			// A failed attempt normally transitions 255 -> 1 -> 255. Preserve
++			// a retry delay on that path so an incorrect password cannot hammer
++			// the private server continuously.
++			if (GlobalRefs::autoLoginAttempts > 0)
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(GlobalRefs::autoLoginAttempts % 3 == 0 ? 60 : 8);
++			else
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(300);
++			SetAutoLoginStatus("login screen detected");
++		}
++		else if (loginScreen == 1) {
++			SetAutoLoginStatus("credentials submitted; waiting for server");
++		}
++		else if (loginStep == 1) {
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(800);
++			SetAutoLoginStatus("world/channel screen detected");
++		}
++		else if (loginStep == 2) {
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(800);
++			SetAutoLoginStatus("character screen detected");
++		}
+ 	}
+-	else {
+-		MessageBox::Show("true!");
+-		Hooks::CLogin__OnRecommendWorldMessage_Hook(true); //Crashes, wrong params maybe
+ 
++	if (DateTime::Now < GlobalRefs::autoLoginNextAction)
++		return;
++
++	if (loginScreen == 255 && loginStep == 0) {
++		switch (GlobalRefs::autoLoginPhase) {
++			case AUTOLOGIN_IDLE:
++			case AUTOLOGIN_USERNAME:
++				// Coordinates are client-relative and match the supplied Chinese
++				// SoulMS login panel, so moving the game window is harmless.
++				if (!ClickMapleClientPoint(125, 159, false)) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(2);
++					return;
++				}
++				ClearFocusedLoginField();
++				TypeCredentialText(username);
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_PASSWORD;
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(350);
++				SetAutoLoginStatus("username entered");
++				return;
++
++			case AUTOLOGIN_PASSWORD:
++				if (!ClickMapleClientPoint(125, 190, false)) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(2);
++					return;
++				}
++				ClearFocusedLoginField();
++				TypeCredentialText(password);
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_CONNECT;
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(350);
++				SetAutoLoginStatus("password entered");
++				return;
++
++			case AUTOLOGIN_CONNECT:
++				ClickMapleClientPoint(258, 158, false);
++				GlobalRefs::autoLoginAttempts++;
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_LOGIN;
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(8);
++				SetAutoLoginStatus("Connect clicked (attempt " + GlobalRefs::autoLoginAttempts.ToString() + ")");
++				return;
++
++			case AUTOLOGIN_WAIT_LOGIN:
++				GlobalRefs::autoLoginPhase = AUTOLOGIN_USERNAME;
++				if (GlobalRefs::autoLoginAttempts % 3 == 0) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(60);
++					SetAutoLoginStatus("login did not advance; cooling down for 60 seconds");
++				}
++				else {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(8);
++					SetAutoLoginStatus("login did not advance; retry scheduled");
++				}
++				return;
++		}
++	}
++
++	if (loginScreen == 0 && loginStep == 1) {
++		if (GlobalRefs::autoLoginPhase < AUTOLOGIN_WORLD || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHANNEL)
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
++
++		if (GlobalRefs::autoLoginPhase == AUTOLOGIN_WORLD) {
++			SelectGridItemByKeyboard(GetComboIndex(form->comboAutoLoginWorld), 4);
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHANNEL;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(2);
++			SetAutoLoginStatus("world selected");
++		}
++		else if (GlobalRefs::autoLoginPhase == AUTOLOGIN_CHANNEL) {
++			SelectGridItemByKeyboard(GetComboIndex(form->comboAutoLoginChannel), 5);
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_CHANNEL;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(5);
++			SetAutoLoginStatus("channel selected");
++		}
++		else {
++			// If the server kept us on the same step, repeat the world/channel
++			// sequence after a modest delay instead of hammering Enter.
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WORLD;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(10);
++			SetAutoLoginStatus("world/channel selection did not advance; retry scheduled");
++		}
++		return;
++	}
++
++	if (loginScreen == 0 && loginStep == 2) {
++		if (GlobalRefs::autoLoginPhase < AUTOLOGIN_CHARACTER || GlobalRefs::autoLoginPhase > AUTOLOGIN_WAIT_CHARACTER)
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHARACTER;
++
++		if (GlobalRefs::autoLoginPhase == AUTOLOGIN_CHARACTER) {
++			SelectGridItemByKeyboard(GetComboIndex(form->comboAutoLoginCharacter), 3);
++			GlobalRefs::autoLoginPhase = form->cbAutoLoginPic->Checked ? AUTOLOGIN_PIC : AUTOLOGIN_WAIT_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(form->cbAutoLoginPic->Checked ? 2 : 6);
++			SetAutoLoginStatus("character selected");
++		}
++		else if (GlobalRefs::autoLoginPhase == AUTOLOGIN_PIC) {
++			String^ pic = form->tbAutoLoginPIC->Text == nullptr ? String::Empty : form->tbAutoLoginPIC->Text->Trim();
++			if (!String::IsNullOrEmpty(pic)) {
++				TypeCredentialText(pic);
++				TapPhysicalKey(VK_RETURN);
++				SetAutoLoginStatus("PIC submitted");
++			}
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(6);
++		}
++		else {
++			GlobalRefs::autoLoginPhase = AUTOLOGIN_CHARACTER;
++			GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(10);
++			SetAutoLoginStatus("character selection did not advance; retry scheduled");
++		}
+ 	}
+ }
+ 
+@@ -512,13 +945,14 @@ void MainForm::cbAutoLoginSkipLogo_CheckedChanged(System::Object^  sender, Syste
+ }
+ 
+ void MainForm::cbAutoLogin_CheckedChanged(System::Object^  sender, System::EventArgs^  e) {
+-	if(this->cbAutoLogin->Checked)
+-		SetLoginHooks(true);
+-	else
+-		SetLoginHooks(false);
+-	
+-	//if (this->cbAutoLogin->Checked)
+-		//AutoLogin();
++	if (this->cbAutoLogin->Checked) {
++		ResetAutoLoginState(true);
++		SetAutoLoginStatus("enabled");
++	}
++	else {
++		ResetAutoLoginState(false);
++		SetAutoLoginStatus("disabled");
++	}
+ }
+ #pragma endregion
+ 
+@@ -534,6 +968,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
+ static int keyCollection[] = { 0x10, 0x11, 0x12, 0x20, 0x2D, 0x2E, 0x24, 0x23, 0x21, 0x22, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51,
+ 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39 };
+ 
++static int GetKeyCodeFromName(String^ keyName) {
++	if (String::IsNullOrWhiteSpace(keyName))
++		return 0;
++
++	String^ key = keyName->Trim()->ToUpperInvariant();
++	if (key->Length == 1) {
++		wchar_t value = key[0];
++		if ((value >= L'A' && value <= L'Z') || (value >= L'0' && value <= L'9'))
++			return (int)value;
++	}
++
++	if (key == "SHIFT") return VK_SHIFT;
++	if (key == "CONTROL") return VK_CONTROL;
++	if (key == "ALT") return VK_MENU;
++	if (key == "SPACE") return VK_SPACE;
++	if (key == "INSERT") return VK_INSERT;
++	if (key == "DELETE") return VK_DELETE;
++	if (key == "HOME") return VK_HOME;
++	if (key == "END") return VK_END;
++	if (key == "PAGE UP") return VK_PRIOR;
++	if (key == "PAGE DOWN") return VK_NEXT;
++	return 0;
++}
++
++static Macro^ GetOrCreateBuffMacro(ListViewItem^ item) {
++	if (item == nullptr)
++		return nullptr;
++
++	Macro^ macro = dynamic_cast<Macro^>(item->Tag);
++	if (macro != nullptr)
++		return macro;
++
++	if (item->SubItems->Count < 3)
++		return nullptr;
++
++	int keyCode = GetKeyCodeFromName(item->SubItems[1]->Text);
++	UInt32 intervalSeconds = 0;
++	if (keyCode == 0 || !UInt32::TryParse(item->SubItems[2]->Text, intervalSeconds) || intervalSeconds == 0 || intervalSeconds > 2147483)
++		return nullptr;
++
++	macro = gcnew Macro(keyCode, (int)(intervalSeconds * 1000), MacroType::BUFFMACRO);
++	item->Tag = macro;
++	return macro;
++}
++
+ //Check if keypress is valid
+ static bool isKeyValid(Object^ sender, Windows::Forms::KeyPressEventArgs^ e, bool isSigned) {
+ 	bool result = true;
+@@ -704,51 +1183,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
+ 
+ #pragma region Auto Buffs
+ void MainForm::bBuffAdd_Click(Object^  sender, EventArgs^  e) {
+-	if(String::IsNullOrWhiteSpace(tbBuffInterval->Text)) {
+-		MessageBox::Show("Error: Buff Interval textbox cannot be empty");
++	UInt32 intervalSeconds = 0;
++	if (!UInt32::TryParse(tbBuffInterval->Text, intervalSeconds) || intervalSeconds == 0 || intervalSeconds > 2147483) {
++		MessageBox::Show("Error: Buff interval must be between 1 and 2147483 seconds");
++		return;
++	}
++	if (comboBuffKey->SelectedIndex < 0) {
++		MessageBox::Show("Error: Select a valid buff key");
+ 		return;
+ 	}
+ 	ListViewItem^ lvi = gcnew ListViewItem(gcnew array<String^>{tbBuffName->Text, comboBuffKey->Text, tbBuffInterval->Text});
+-	lvi->Tag = gcnew Macro(keyCollection[comboBuffKey->SelectedIndex], Convert::ToUInt32(tbBuffInterval->Text)*1000, MacroType::BUFFMACRO);
+-	lvi->Checked = true;
++	lvi->Tag = gcnew Macro(keyCollection[comboBuffKey->SelectedIndex], (int)(intervalSeconds * 1000), MacroType::BUFFMACRO);
+ 	lvBuff->Items->Add(lvi);
++	lvi->Checked = true;
+ }
+ 
+ void MainForm::bBuffEnableAll_Click(Object^  sender, EventArgs^  e) {
+ 	for each (ListViewItem^ lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(true);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(true);
+ 		lvi->Checked = true;
+ 	}
+ }
+ 
+ void MainForm::bBuffDisableAll_Click(Object^  sender, EventArgs^  e) {
+ 	for each (ListViewItem ^lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 		lvi->Checked = false;
+ 	}
+ }
+ 
+ void MainForm::bBuffRemove_Click(Object^  sender, EventArgs^  e) {
+ 	for each(ListViewItem^ lvi in lvBuff->SelectedItems) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 		lvBuff->Items->Remove(lvi);
+ 	}
+ }
+ 
+ void MainForm::bBuffClear_Click(Object^  sender, EventArgs^  e) {
+ 	for each(ListViewItem^ lvi in lvBuff->Items) {
+-		Macro^ macro = (Macro^)lvi->Tag;
+-		macro->Toggle(false);
+-		lvBuff->Items->Remove(lvi);
++		Macro^ macro = GetOrCreateBuffMacro(lvi);
++		if (macro != nullptr)
++			macro->Toggle(false);
+ 	}
++	lvBuff->Items->Clear();
+ }
+ 
+ void MainForm::lvBuff_ItemChecked(Object^  sender, Windows::Forms::ItemCheckedEventArgs^  e) {
+-	Macro^ macro = (Macro^)e->Item->Tag;
+-	macro->Toggle(e->Item->Checked);
++	Macro^ macro = GetOrCreateBuffMacro(e->Item);
++	if (macro != nullptr)
++		macro->Toggle(e->Item->Checked);
+ }
+ 
+ void MainForm::tbBuffInterval_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
+@@ -968,25 +1457,38 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
+ }
+ 
+ void ClickTeleport() {
++	bool wasLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+ 	while (GlobalRefs::bClickTeleport) {
+-		if (ReadPointer(InputBase, OFS_MouseAnimation) == 12)
+-			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbClickTeleport->Text));
++		bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
++		int mouseX = 0, mouseY = 0;
++		if (isLeftButtonDown && !wasLeftButtonDown && HelperFuncs::IsInGame() &&
++			TryGetMouseWorldPosition(mouseX, mouseY) && isPosValid(mouseX, mouseY))
++			Teleport(mouseX, mouseY);
++		wasLeftButtonDown = isLeftButtonDown;
++		Sleep(GlobalRefs::clickTeleportDelay);
+ 	}
+ 	ExitThread(0);
+ }
+ 
+ void MouseTeleport() {
+ 	while (GlobalRefs::bMouseTeleport) {
+-		if (ReadPointer(InputBase, OFS_MouseAnimation) == 00)
+-			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbMouseTeleport->Text));
++		int mouseX = 0, mouseY = 0;
++		if (HelperFuncs::IsInGame() && TryGetMouseWorldPosition(mouseX, mouseY) && isPosValid(mouseX, mouseY))
++			Teleport(mouseX, mouseY);
++		Sleep(GlobalRefs::mouseTeleportDelay);
+ 	}
+ 	ExitThread(0);
+ }
+ 
+ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+ 	if (this->cbClickTeleport->Checked) {
++		UInt32 delay = 0;
++		if (!UInt32::TryParse(tbClickTeleport->Text, delay) || delay < 10) {
++			MessageBox::Show("Error: Click Teleport interval must be at least 10 ms");
++			this->cbClickTeleport->Checked = false;
++			return;
++		}
++		GlobalRefs::clickTeleportDelay = delay;
+ 		GlobalRefs::bClickTeleport = true;
+ 		NewThread(ClickTeleport);
+ 	}
+@@ -996,6 +1498,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+  
+ void MainForm::cbMouseTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+ 	if (this->cbMouseTeleport->Checked) {
++		UInt32 delay = 0;
++		if (!UInt32::TryParse(tbMouseTeleport->Text, delay) || delay < 10) {
++			MessageBox::Show("Error: Mouse Teleport interval must be at least 10 ms");
++			this->cbMouseTeleport->Checked = false;
++			return;
++		}
++		GlobalRefs::mouseTeleportDelay = delay;
+ 		GlobalRefs::bMouseTeleport = true;
+ 		NewThread(MouseTeleport);
+ 	}
+diff --git a/Timelapse/MainForm.h b/Timelapse/MainForm.h
+index 7e68e46..e5ba2b5 100644
+--- a/Timelapse/MainForm.h
++++ b/Timelapse/MainForm.h
+@@ -238,7 +238,7 @@ private:
+ private:
+ 
+ 	public: System::Windows::Forms::CheckBox^  cbAutoLoginSkipLogo;
+-	private: System::Windows::Forms::CheckBox^  cbAutoLogin;
++	public: System::Windows::Forms::CheckBox^  cbAutoLogin;
+ 	private: System::Windows::Forms::TabPage^  tabPage18;
+ 	private: System::Windows::Forms::TabPage^  tabPage19;
+ 	private: System::Windows::Forms::Panel^  panel6;
+@@ -2504,6 +2504,7 @@ public:
+ 			this->lvBuff->TabIndex = 0;
+ 			this->lvBuff->UseCompatibleStateImageBehavior = false;
+ 			this->lvBuff->View = System::Windows::Forms::View::Details;
++			this->lvBuff->ItemChecked += gcnew System::Windows::Forms::ItemCheckedEventHandler(this, &MainForm::lvBuff_ItemChecked);
+ 			// 
+ 			// lvBuffHeaderName
+ 			// 
+@@ -2518,7 +2519,7 @@ public:
+ 			// lvBuffHeaderInterval
+ 			// 
+ 			this->lvBuffHeaderInterval->DisplayIndex = 1;
+-			this->lvBuffHeaderInterval->Text = L"Interval [ms]";
++			this->lvBuffHeaderInterval->Text = L"Interval [s]";
+ 			this->lvBuffHeaderInterval->Width = 80;
+ 			// 
+ 			// tabPage12
+diff --git a/Timelapse/MapleFunctions.h b/Timelapse/MapleFunctions.h
+index f7584c1..fd73f9b 100644
+--- a/Timelapse/MapleFunctions.h
++++ b/Timelapse/MapleFunctions.h
+@@ -30,6 +30,167 @@ static ULONG GetMSThreadID() {
+ 	return GetWindowThreadProcessId(GlobalVars::mapleWindow, nullptr);
+ }
+ 
++#pragma unmanaged
++// CLogin survives several screen transitions and is a better session-state
++// source than CUIMiniMap.  The latter commonly keeps the last MapID after a
++// disconnect, which made Timelapse believe the character was still in game.
++static bool TryGetMapleLoginState(int& loginStep, int& loginScreen) {
++	loginStep = -1;
++	loginScreen = -1;
++
++	__try {
++		ULONG login = *(ULONG*)LoginBase;
++		if (login == 0)
++			return false;
++
++		loginStep = *(BYTE*)(login + OFS_LoginStep);
++		loginScreen = *(BYTE*)(login + OFS_LoginScreen);
++
++		// Known v83 states: step 0 = login/in-game, 1 = world/channel,
++		// 2 = character selection; screen 255 = login, 1 = connecting,
++		// 0 = authenticated/in-game.
++		return loginStep >= 0 && loginStep <= 2 &&
++			(loginScreen == 0 || loginScreen == 1 || loginScreen == 255);
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		loginStep = -1;
++		loginScreen = -1;
++		return false;
++	}
++}
++
++static bool HasMapleLocalPlayer() {
++	__try {
++		return *(ULONG*)UserLocalBase != 0;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
++// Resolve the cursor to MapleStory world coordinates.  Some v83 clients
++// (including the BeiDou-based client) store these as floats on a different
++// CInputSystem chain than the original Timelapse offsets.
++static bool GetCursorInMapleClient(POINT& clientPoint, int& clientWidth, int& clientHeight) {
++	HWND mapleWindow = GlobalVars::mapleWindow;
++	if (mapleWindow == nullptr)
++		mapleWindow = GetMSWindowHandle();
++	if (mapleWindow == nullptr || !IsWindow(mapleWindow))
++		return false;
++
++	POINT screenPoint;
++	RECT clientRect;
++	if (!GetCursorPos(&screenPoint) || !ScreenToClient(mapleWindow, &screenPoint) || !GetClientRect(mapleWindow, &clientRect))
++		return false;
++
++	clientWidth = clientRect.right - clientRect.left;
++	clientHeight = clientRect.bottom - clientRect.top;
++	if (clientWidth <= 0 || clientHeight <= 0 || screenPoint.x < 0 || screenPoint.y < 0 ||
++		screenPoint.x >= clientWidth || screenPoint.y >= clientHeight)
++		return false;
++
++	clientPoint = screenPoint;
++	return true;
++}
++
++static bool IsMouseWorldPositionPlausible(int x, int y) {
++	if (x < -1000000 || x > 1000000 || y < -1000000 || y > 1000000)
++		return false;
++
++	int left = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_LeftWall);
++	int right = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_RightWall);
++	int top = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_TopWall);
++	int bottom = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_BottomWall);
++	if (right > left && bottom > top)
++		return x >= left - 4096 && x <= right + 4096 && y >= top - 4096 && y <= bottom + 4096;
++
++	return true;
++}
++
++static bool TryGetBeiDouMouseWorldPosition(int& x, int& y) {
++	__try {
++		ULONG inputSystem = *(ULONG*)InputBase;
++		if (inputSystem == 0) return false;
++		ULONG mouseContext = *(ULONG*)(inputSystem + 0x97C);
++		if (mouseContext == 0) return false;
++		ULONG mouseNode = *(ULONG*)(mouseContext + 0x8);
++		if (mouseNode == 0) return false;
++		ULONG worldPoint = *(ULONG*)(mouseNode + 0x78);
++		if (worldPoint == 0) return false;
++
++		float worldX = *(float*)(worldPoint);
++		float worldY = *(float*)(worldPoint + 4);
++		if (worldX != worldX || worldY != worldY || worldX < -1000000.0f || worldX > 1000000.0f ||
++			worldY < -1000000.0f || worldY > 1000000.0f)
++			return false;
++
++		x = (int)(worldX >= 0.0f ? worldX + 0.5f : worldX - 0.5f);
++		y = (int)(worldY >= 0.0f ? worldY + 0.5f : worldY - 0.5f);
++		return IsMouseWorldPositionPlausible(x, y);
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
++static bool TryGetLegacyMouseWorldPosition(int& x, int& y) {
++	x = (int)ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX);
++	y = (int)ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY);
++	return IsMouseWorldPositionPlausible(x, y);
++}
++
++// Last-resort conversion for clients that expose neither known memory chain.
++// It maps the Windows cursor through the camera area using the character and
++// map bounds, so Mouse Teleport still follows the real cursor.
++static bool TryGetApproximateMouseWorldPosition(const POINT& clientPoint, int clientWidth, int clientHeight, int& x, int& y) {
++	int left = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_LeftWall);
++	int right = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_RightWall);
++	int top = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_TopWall);
++	int bottom = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_BottomWall);
++	int charX = ReadPointerSignedInt(UserLocalBase, OFS_CharX);
++	int charY = ReadPointerSignedInt(UserLocalBase, OFS_CharY);
++	if (right <= left || bottom <= top)
++		return false;
++
++	int mapWidth = right - left;
++	int mapHeight = bottom - top;
++	int cameraLeft = charX - (clientWidth / 2);
++	int cameraTop = charY - (clientHeight / 2);
++
++	if (mapWidth > clientWidth) {
++		if (cameraLeft < left) cameraLeft = left;
++		if (cameraLeft > right - clientWidth) cameraLeft = right - clientWidth;
++	}
++	else {
++		cameraLeft = left - ((clientWidth - mapWidth) / 2);
++	}
++
++	if (mapHeight > clientHeight) {
++		if (cameraTop < top) cameraTop = top;
++		if (cameraTop > bottom - clientHeight) cameraTop = bottom - clientHeight;
++	}
++	else {
++		cameraTop = top - ((clientHeight - mapHeight) / 2);
++	}
++
++	x = cameraLeft + clientPoint.x;
++	y = cameraTop + clientPoint.y;
++	return IsMouseWorldPositionPlausible(x, y);
++}
++
++static bool TryGetMouseWorldPosition(int& x, int& y) {
++	POINT clientPoint;
++	int clientWidth = 0, clientHeight = 0;
++	if (!GetCursorInMapleClient(clientPoint, clientWidth, clientHeight))
++		return false;
++
++	if (TryGetBeiDouMouseWorldPosition(x, y))
++		return true;
++	if (TryGetLegacyMouseWorldPosition(x, y))
++		return true;
++	return TryGetApproximateMouseWorldPosition(clientPoint, clientWidth, clientHeight, x, y);
++}
++
+ #pragma managed
+ //Get MS ProcessID
+ static String^ GetMSProcID() {
+@@ -239,17 +400,22 @@ namespace PointerFuncs {
+ 
+ 	//Retrieve Mouse Position
+ 	static String^ getMousePos() {
+-		return "(" + ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX).ToString() + ", " + ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY).ToString() + ")";
++		int x = 0, y = 0;
++		if (!TryGetMouseWorldPosition(x, y))
++			return "(Outside game)";
++		return "(" + Convert::ToString(x) + ", " + Convert::ToString(y) + ")";
+ 	}
+ 
+ 	//Retrieve Mouse X Position
+ 	static String^ getMousePosX() {
+-		return ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX).ToString();
++		int x = 0, y = 0;
++		return TryGetMouseWorldPosition(x, y) ? Convert::ToString(x) : "N/A";
+ 	}
+ 
+ 	//Retrieve Mouse Y Position
+ 	static String^ getMousePosY() {
+-		return ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY).ToString();
++		int x = 0, y = 0;
++		return TryGetMouseWorldPosition(x, y) ? Convert::ToString(y) : "N/A";
+ 	}
+ 
+ 	//Retrieve Char Animation
+@@ -320,12 +486,18 @@ namespace HelperFuncs {
+ 
+ 	static bool IsInGame()
+ 	{
+-		const int mapID = Convert::ToInt32(PointerFuncs::getMapID());
+-
+-		if (!mapID == 0) //&& !PointerFuncs::getCharName()->Equals("CharName")
+-			return true;
++		if (!HasMapleLocalPlayer())
++			return false;
++
++		int loginStep = -1;
++		int loginScreen = -1;
++		if (TryGetMapleLoginState(loginStep, loginScreen)) {
++			if (loginScreen == 255 || loginScreen == 1 || loginStep == 1 || loginStep == 2)
++				return false;
++		}
+ 
+-		return false;
++		const int mapID = Convert::ToInt32(PointerFuncs::getMapID());
++		return mapID != 0;
+ 	}
+ 
+ 	static bool ValidToAttack()
+diff --git a/Timelapse/Settings.cpp b/Timelapse/Settings.cpp
+index 7dbfe8b..0e4ba3a 100644
+--- a/Timelapse/Settings.cpp
++++ b/Timelapse/Settings.cpp
+@@ -5,6 +5,24 @@ using namespace Timelapse;
+ using namespace System;
+ using namespace IO;
+ using namespace Collections::Generic;
++using namespace System::Security::Cryptography;
++using namespace System::Text;
++
++static bool IsCredentialControlName(String^ controlName) {
++	return controlName == "tbAutoLoginPassword" || controlName == "tbAutoLoginPIC";
++}
++
++static String^ ProtectCredentialText(String^ value) {
++	array<Byte>^ clearBytes = Encoding::UTF8->GetBytes(value == nullptr ? String::Empty : value);
++	array<Byte>^ protectedBytes = ProtectedData::Protect(clearBytes, nullptr, DataProtectionScope::CurrentUser);
++	return Convert::ToBase64String(protectedBytes);
++}
++
++static String^ UnprotectCredentialText(String^ value) {
++	array<Byte>^ protectedBytes = Convert::FromBase64String(value);
++	array<Byte>^ clearBytes = ProtectedData::Unprotect(protectedBytes, nullptr, DataProtectionScope::CurrentUser);
++	return Encoding::UTF8->GetString(clearBytes);
++}
+ 
+ Object^ Settings::Deserialize(String^ path, XmlSerializer^ serializer) {
+ 	if (File::Exists(path)) {
+@@ -48,29 +66,46 @@ void Settings::Serialize(String^ path, XmlSerializer^ serializer, Object^ object
+ 	}
+ }
+ 
+-void Settings::Serialize(Control^ c, String^ XmlFileName) {
+-	XmlTextWriter^ xmlSerializedForm = gcnew XmlTextWriter(XmlFileName, System::Text::Encoding::Default);
++bool Settings::Serialize(Control^ c, String^ XmlFileName) {
++	XmlTextWriter^ xmlSerializedForm = nullptr;
++
++	try {
++		String^ directory = Path::GetDirectoryName(XmlFileName);
++		if (!String::IsNullOrWhiteSpace(directory))
++			Directory::CreateDirectory(directory);
+ 
+-	xmlSerializedForm->Formatting = Formatting::Indented;
+-	xmlSerializedForm->WriteStartDocument();
+-	xmlSerializedForm->WriteStartElement("Timelapse");
++		xmlSerializedForm = gcnew XmlTextWriter(XmlFileName, System::Text::Encoding::UTF8);
++		xmlSerializedForm->Formatting = Formatting::Indented;
++		xmlSerializedForm->WriteStartDocument();
++		xmlSerializedForm->WriteStartElement("Timelapse");
+ 
+-	// enumerate all controls on the form, and serialize them as appropriate
+-	AddChildControls(xmlSerializedForm, c);
++		// Enumerate all supported controls on the form.
++		AddChildControls(xmlSerializedForm, c);
+ 
+-	xmlSerializedForm->WriteEndElement();
+-	xmlSerializedForm->WriteEndDocument();
+-	xmlSerializedForm->Flush();
+-	xmlSerializedForm->Close();
++		xmlSerializedForm->WriteEndElement();
++		xmlSerializedForm->WriteEndDocument();
++		xmlSerializedForm->Flush();
++		xmlSerializedForm->Close();
++		xmlSerializedForm = nullptr;
++		Log::WriteLine("Saved " + XmlFileName);
++		return File::Exists(XmlFileName) && (gcnew FileInfo(XmlFileName))->Length > 0;
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Exception occured while saving settings to " + XmlFileName + " : " + ex->Message);
++	}
++	finally {
++		if (xmlSerializedForm != nullptr)
++			xmlSerializedForm->Close();
++	}
+ 
+-	Log::WriteLine("Saved " + XmlFileName);
++	return false;
+ }
+ 
+ bool Settings::isExcluded(Control^ ctrl) {
+ 	const auto ctrlName = ctrl->Name;
+ 	if (ctrlName == "lbConsoleLog" || ctrlName == "tbItemFilterSearch" || ctrlName == "tbItemFilterSearch" || ctrlName == "lbItemSearchLog" ||
+ 		ctrlName == "lbMobSearchLog" || ctrlName == "tbMobFilterSearch" || ctrlName == "tbSendPacket" || ctrlName == "tbMapRusherSearch" || 
+-		ctrlName == "lvMapRusherSearch" || ctrlName == "lvBuff")
++		ctrlName == "lvMapRusherSearch")
+ 		return true;
+ 
+ 	return false;
+@@ -80,10 +115,15 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 	for each(Control^ childCtrl in c->Controls) {
+ 		auto ctrlType = childCtrl->GetType();
+ 		auto ctrlName = childCtrl->Name;
++		bool isSerializableControl = ctrlType == ComboBox::typeid || ctrlType == NumericUpDown::typeid ||
++			ctrlType == CheckBox::typeid || ctrlType == TextBox::typeid || ctrlType == ListBox::typeid ||
++			ctrlType == ListView::typeid;
++
++		if (isExcluded(childCtrl))
++			continue;
+ 
+ 		//TODO: save press state of buttons?
+-		if (childCtrl->HasChildren || ctrlType == ComboBox::typeid || ctrlType == NumericUpDown::typeid || ctrlType == CheckBox::typeid || 
+-			ctrlType == TextBox::typeid || ctrlType == ListBox::typeid && c && !isExcluded(childCtrl)) { 
++		if (childCtrl->HasChildren || isSerializableControl) {
+ 			// serialize this control
+ 			xmlSerializedForm->WriteStartElement("Control");
+ 			xmlSerializedForm->WriteAttributeString("Name", ctrlName);
+@@ -94,8 +134,13 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 				xmlSerializedForm->WriteAttributeString("Value", safe_cast<NumericUpDown^>(childCtrl)->Value.ToString());
+ 			else if (ctrlType == CheckBox::typeid)
+ 				xmlSerializedForm->WriteAttributeString("Checked", safe_cast<CheckBox^>(childCtrl)->Checked.ToString());
+-			else if (ctrlType == TextBox::typeid)
+-				xmlSerializedForm->WriteAttributeString("Text", safe_cast<TextBox^>(childCtrl)->Text->ToString());
++			else if (ctrlType == TextBox::typeid) {
++				String^ text = safe_cast<TextBox^>(childCtrl)->Text;
++				if (IsCredentialControlName(ctrlName))
++					xmlSerializedForm->WriteAttributeString("ProtectedText", ProtectCredentialText(text));
++				else
++					xmlSerializedForm->WriteAttributeString("Text", text == nullptr ? String::Empty : text);
++			}
+ 			else if (ctrlType == ListBox::typeid) {
+ 				ListBox^ listBox = safe_cast<ListBox^>(childCtrl);
+ 				int listBoxItemCnt = listBox->Items->Count;
+@@ -108,9 +153,24 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 					xmlSerializedForm->WriteAttributeString(listBoxItemNmbStr, listBoxItemStr);
+ 				}
+ 			}
++			else if (ctrlType == ListView::typeid) {
++				ListView^ listView = safe_cast<ListView^>(childCtrl);
++				int itemCnt = listView->Items->Count;
++				xmlSerializedForm->WriteAttributeString("ListViewItemCnt", itemCnt.ToString());
++
++				for (int i = 0; i < itemCnt; i++) {
++					ListViewItem^ item = listView->Items[i];
++					String^ itemPrefix = "Item" + i.ToString();
++					xmlSerializedForm->WriteAttributeString(itemPrefix + "Checked", item->Checked.ToString());
++					xmlSerializedForm->WriteAttributeString(itemPrefix + "SubItemCnt", item->SubItems->Count.ToString());
++
++					for (int j = 0; j < item->SubItems->Count; j++)
++						xmlSerializedForm->WriteAttributeString(itemPrefix + "SubItem" + j.ToString(), item->SubItems[j]->Text);
++				}
++			}
+ 
+ 			// see if this control has any children, and if so, serialize them
+-			if (childCtrl->HasChildren && ctrlType != NumericUpDown::typeid)
++			if (childCtrl->HasChildren && !isSerializableControl)
+ 				AddChildControls(xmlSerializedForm, childCtrl);
+ 
+ 			xmlSerializedForm->WriteEndElement(); // Control
+@@ -118,20 +178,29 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 	}
+ }
+ 
+-void Settings::Deserialize(Control^ c, String^ XmlFileName) {
+-	if (File::Exists(XmlFileName)) {
+-		try {
+-			XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
+-			xmlSerializedForm->Load(XmlFileName);
++bool Settings::Deserialize(Control^ c, String^ XmlFileName) {
++	if (!File::Exists(XmlFileName))
++		return false;
+ 
+-			XmlNode^ topLevel = xmlSerializedForm->ChildNodes[1];
+-			for each(XmlNode^ n in topLevel->ChildNodes)
+-				SetControlProperties(safe_cast<Control^>(c), n);
+-		}
+-		catch (Exception^ ex) {
+-			Log::WriteLine("While deserializing \"" + c->Name + "\" the following exception occured: \"" + ex->Message + "\"");
+-		}
++	try {
++		XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
++		xmlSerializedForm->Load(XmlFileName);
++
++		XmlNode^ topLevel = xmlSerializedForm->DocumentElement;
++		if (topLevel == nullptr || topLevel->Name != "Timelapse")
++			return false;
++
++		for each(XmlNode^ n in topLevel->ChildNodes)
++			SetControlProperties(safe_cast<Control^>(c), n);
++
++		Log::WriteLine("Loaded " + XmlFileName);
++		return true;
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("While deserializing \"" + c->Name + "\" the following exception occured: \"" + ex->Message + "\"");
+ 	}
++
++	return false;
+ }
+ 
+ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+@@ -140,6 +209,8 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+ 		String^ ctrlName = n->Attributes["Name"]->Value;
+ 		// find the control
+ 		auto ctrl = currentCtrl->Controls->Find(ctrlName, true);
++		if (ctrl == nullptr || ctrl->Length == 0)
++			return;
+ 
+ 		// the right type too
+ 		if (n->Attributes["SelectedIndex"])
+@@ -148,19 +219,42 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+ 			safe_cast<NumericUpDown^>(ctrl[0])->Value = Convert::ToDecimal(n->Attributes["Value"]->Value);
+ 		else if (n->Attributes["Checked"])
+ 			safe_cast<CheckBox^>(ctrl[0])->Checked = Convert::ToBoolean(n->Attributes["Checked"]->Value);
++		else if (n->Attributes["ProtectedText"])
++			safe_cast<TextBox^>(ctrl[0])->Text = UnprotectCredentialText(n->Attributes["ProtectedText"]->Value);
+ 		else if (n->Attributes["Text"])
+ 			safe_cast<TextBox^>(ctrl[0])->Text = Convert::ToString(n->Attributes["Text"]->Value);
+ 		else if (n->Attributes["ItemCnt"]) {
+ 			int itemCnt = Convert::ToInt32(n->Attributes["ItemCnt"]->Value);
+ 			auto collection = safe_cast<ListBox^>(ctrl[0])->Items;
++			collection->Clear();
+ 
+-			if (itemCnt < 1) return;
+ 			for (int i = 0; i < itemCnt; i++) {
+ 				String^ indexedListBoxItemStr = ctrlName + "Item" + i.ToString();
+ 				String^ itemToAddStr = Convert::ToString(n->Attributes[indexedListBoxItemStr]->Value);
+ 				collection->Add(itemToAddStr);
+ 			}
+ 		}
++		else if (n->Attributes["ListViewItemCnt"]) {
++			ListView^ listView = safe_cast<ListView^>(ctrl[0]);
++			int itemCnt = Convert::ToInt32(n->Attributes["ListViewItemCnt"]->Value);
++			listView->BeginUpdate();
++			listView->Items->Clear();
++
++			for (int i = 0; i < itemCnt; i++) {
++				String^ itemPrefix = "Item" + i.ToString();
++				int subItemCnt = Convert::ToInt32(n->Attributes[itemPrefix + "SubItemCnt"]->Value);
++				array<String^>^ row = gcnew array<String^>(subItemCnt);
++
++				for (int j = 0; j < subItemCnt; j++)
++					row[j] = Convert::ToString(n->Attributes[itemPrefix + "SubItem" + j.ToString()]->Value);
++
++				ListViewItem^ item = gcnew ListViewItem(row);
++				listView->Items->Add(item);
++				item->Checked = Convert::ToBoolean(n->Attributes[itemPrefix + "Checked"]->Value);
++			}
++
++			listView->EndUpdate();
++		}
+ 
+ 		// if n has any children that are controls, deserialize them as well
+ 		if (n->HasChildNodes && ctrl[0]->HasChildren) {
+@@ -180,6 +274,7 @@ String^ Settings::GetSettingsPath() {
+ 
+ 	try {
+ 		String^ TimelapseFolderPath = Path::Combine(AppDataFolder, "Timelapse");
++		Directory::CreateDirectory(TimelapseFolderPath);
+ 		SettingsFilePath = Path::Combine(TimelapseFolderPath, "Settings.xml");
+ 	}
+ 	catch (Exception^ ex) {
+diff --git a/Timelapse/Settings.h b/Timelapse/Settings.h
+index 7ce77ad..5ca6c00 100644
+--- a/Timelapse/Settings.h
++++ b/Timelapse/Settings.h
+@@ -9,9 +9,9 @@ namespace Timelapse {
+ 	public ref class Settings {
+ 		public:
+ 			static Object^ Deserialize(String^ Path, XmlSerializer^ Deserializer);
+-			static void Deserialize(Control^ c, String^ Path);
++			static bool Deserialize(Control^ c, String^ Path);
+ 			static void Serialize(String^ Path, XmlSerializer^ Serializer, Object^ Collection);
+-			static void Serialize(Control^ c, String^ Path);
++			static bool Serialize(Control^ c, String^ Path);
+ 			static bool isExcluded(Control^ ctrl);
+ 			static String^ GetSettingsPath();
+ 
+diff --git a/Timelapse/Timelapse.vcxproj b/Timelapse/Timelapse.vcxproj
+index 8e3fefd..24d00d8 100644
+--- a/Timelapse/Timelapse.vcxproj
++++ b/Timelapse/Timelapse.vcxproj
+@@ -135,6 +135,7 @@
+     <Reference Include="System" />
+     <Reference Include="System.Data" />
+     <Reference Include="System.Drawing" />
++    <Reference Include="System.Security" />
+     <Reference Include="System.Windows.Forms" />
+     <Reference Include="System.Xml" />
+   </ItemGroup>
