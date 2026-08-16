@@ -240,7 +240,7 @@ index 023ca14..d484aca 100644
  		}
  	}
 diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
-index 3c102b2..088f7d2 100644
+index 3c102b2..18e6c6b 100644
 --- a/Timelapse/MainForm.cpp
 +++ b/Timelapse/MainForm.cpp
 @@ -24,6 +24,7 @@ ref struct GlobalRefs {
@@ -251,16 +251,48 @@ index 3c102b2..088f7d2 100644
  	static bool bWallVac = false, bDupeX = false, bMMC = false, bUEMI = false;
  	static UINT cccsTimerTickCount = 0;
  	static bool isDragging = false, isEmbedding = false;
-@@ -165,11 +166,24 @@ void MainForm::pnlFull_MouseMove(Object^  sender, Windows::Forms::MouseEventArgs
+@@ -32,6 +33,7 @@ ref struct GlobalRefs {
+ 	static double formOpacity;
+ 	static Generic::List<MapData^>^ maps;
+ 	static bool bSendPacketLog = false, bRecvPacketLog = false;
++	static String^ settingsDialogDirectory;
+ };
+ 
+ #pragma region General Form
+@@ -164,12 +166,63 @@ void MainForm::pnlFull_MouseMove(Object^  sender, Windows::Forms::MouseEventArgs
+ #pragma endregion
  
  #pragma region ToolStrip
++static String^ GetSettingsDialogDirectory() {
++	if (!String::IsNullOrWhiteSpace(GlobalRefs::settingsDialogDirectory) && Directory::Exists(GlobalRefs::settingsDialogDirectory))
++		return GlobalRefs::settingsDialogDirectory;
++
++	String^ defaultDirectory = Path::GetDirectoryName(Settings::GetSettingsPath());
++	if (!String::IsNullOrWhiteSpace(defaultDirectory)) {
++		Directory::CreateDirectory(defaultDirectory);
++		GlobalRefs::settingsDialogDirectory = defaultDirectory;
++	}
++
++	return defaultDirectory;
++}
++
  void MainForm::loadSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
 -	Settings::Deserialize(this, Settings::GetSettingsPath());
-+	String^ settingsPath = Settings::GetSettingsPath();
-+	if (!File::Exists(settingsPath)) {
-+		MessageBox::Show("No saved settings file was found at:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++	OpenFileDialog^ dialog = gcnew OpenFileDialog();
++	dialog->Title = "Open Timelapse Settings";
++	dialog->Filter = "Timelapse settings (*.xml)|*.xml|All files (*.*)|*.*";
++	dialog->FilterIndex = 1;
++	dialog->DefaultExt = "xml";
++	dialog->CheckFileExists = true;
++	dialog->CheckPathExists = true;
++	dialog->Multiselect = false;
++	dialog->InitialDirectory = GetSettingsDialogDirectory();
++
++	if (dialog->ShowDialog(this) != System::Windows::Forms::DialogResult::OK)
 +		return;
-+	}
++
++	String^ settingsPath = dialog->FileName;
++	GlobalRefs::settingsDialogDirectory = Path::GetDirectoryName(settingsPath);
 +
 +	if (Settings::Deserialize(this, settingsPath))
 +		MessageBox::Show("Settings loaded successfully from:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
@@ -270,7 +302,22 @@ index 3c102b2..088f7d2 100644
  
  void MainForm::saveSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
 -	Settings::Serialize(this, Settings::GetSettingsPath());
-+	String^ settingsPath = Settings::GetSettingsPath();
++	SaveFileDialog^ dialog = gcnew SaveFileDialog();
++	dialog->Title = "Save Timelapse Settings As";
++	dialog->Filter = "Timelapse settings (*.xml)|*.xml|All files (*.*)|*.*";
++	dialog->FilterIndex = 1;
++	dialog->DefaultExt = "xml";
++	dialog->AddExtension = true;
++	dialog->CheckPathExists = true;
++	dialog->OverwritePrompt = true;
++	dialog->FileName = "Timelapse-profile.xml";
++	dialog->InitialDirectory = GetSettingsDialogDirectory();
++
++	if (dialog->ShowDialog(this) != System::Windows::Forms::DialogResult::OK)
++		return;
++
++	String^ settingsPath = dialog->FileName;
++	GlobalRefs::settingsDialogDirectory = Path::GetDirectoryName(settingsPath);
 +	if (Settings::Serialize(this, settingsPath))
 +		MessageBox::Show("Settings saved successfully to:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
 +	else
@@ -278,7 +325,7 @@ index 3c102b2..088f7d2 100644
  }
  
  void MainForm::closeMapleStoryToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
-@@ -534,6 +548,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
+@@ -534,6 +587,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
  static int keyCollection[] = { 0x10, 0x11, 0x12, 0x20, 0x2D, 0x2E, 0x24, 0x23, 0x21, 0x22, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51,
  0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39 };
  
@@ -330,7 +377,7 @@ index 3c102b2..088f7d2 100644
  //Check if keypress is valid
  static bool isKeyValid(Object^ sender, Windows::Forms::KeyPressEventArgs^ e, bool isSigned) {
  	bool result = true;
-@@ -704,51 +763,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
+@@ -704,51 +802,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
  
  #pragma region Auto Buffs
  void MainForm::bBuffAdd_Click(Object^  sender, EventArgs^  e) {
@@ -407,7 +454,7 @@ index 3c102b2..088f7d2 100644
  }
  
  void MainForm::tbBuffInterval_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
-@@ -968,25 +1037,38 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
+@@ -968,25 +1076,38 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
  }
  
  void ClickTeleport() {
@@ -452,7 +499,7 @@ index 3c102b2..088f7d2 100644
  		GlobalRefs::bClickTeleport = true;
  		NewThread(ClickTeleport);
  	}
-@@ -996,6 +1078,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+@@ -996,6 +1117,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
   
  void MainForm::cbMouseTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
  	if (this->cbMouseTeleport->Checked) {
