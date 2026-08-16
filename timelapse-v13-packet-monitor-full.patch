@@ -295,7 +295,7 @@ index 023ca14fa8b6bfae4ce71288b75dff4e4cd4e6b8..d484aca3ad6c473fa441d7f8609192aa
  		}
  	}
 diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
-index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..becd5cefaa5fbe2436aef4fd4d43765b7a2f53c0 100644
+index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..a797551bcfbabc865742ad148c34470045777d72 100644
 --- a/Timelapse/MainForm.cpp
 +++ b/Timelapse/MainForm.cpp
 @@ -16,6 +16,7 @@ using namespace Timelapse;
@@ -1442,12 +1442,12 @@ index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..becd5cefaa5fbe2436aef4fd4d43765b
  		GlobalRefs::bMouseTeleport = true;
  		NewThread(MouseTeleport);
  	}
-@@ -2114,10 +2868,97 @@ void MainForm::tbMobFilterID_KeyPress(Object^  sender, Windows::Forms::KeyPressE
+@@ -2114,10 +2868,99 @@ void MainForm::tbMobFilterID_KeyPress(Object^  sender, Windows::Forms::KeyPressE
  #pragma endregion
  
  #pragma region Packets Tab
 +static String^ PacketBytesToHex(const std::vector<BYTE>& bytes) {
-+	Text::StringBuilder^ result = gcnew Text::StringBuilder(static_cast<int>(bytes.size() * 3));
++	System::Text::StringBuilder^ result = gcnew System::Text::StringBuilder(static_cast<int>(bytes.size() * 3));
 +	for (size_t i = 0; i < bytes.size(); ++i) {
 +		if (i > 0)
 +			result->Append(' ');
@@ -1509,10 +1509,12 @@ index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..becd5cefaa5fbe2436aef4fd4d43765b
 +		root->Tag = raw;
 +		const size_t bytesPerLine = 24;
 +		for (size_t offset = 0; offset < entry.bytes.size(); offset += bytesPerLine) {
-+			Text::StringBuilder^ line = gcnew Text::StringBuilder();
++			System::Text::StringBuilder^ line = gcnew System::Text::StringBuilder();
 +			line->AppendFormat("{0:X4}", static_cast<UInt32>(offset));
 +			line->Append(": ");
-+			const size_t end = std::min(offset + bytesPerLine, entry.bytes.size());
++			size_t end = offset + bytesPerLine;
++			if (end > entry.bytes.size())
++				end = entry.bytes.size();
 +			for (size_t index = offset; index < end; ++index) {
 +				if (index > offset)
 +					line->Append(' ');
@@ -1542,7 +1544,7 @@ index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..becd5cefaa5fbe2436aef4fd4d43765b
  }
  
  void MainForm::tbSendSpamDelay_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
-@@ -2125,23 +2966,125 @@ void MainForm::tbSendSpamDelay_KeyPress(Object^  sender, Windows::Forms::KeyPres
+@@ -2125,23 +2968,125 @@ void MainForm::tbSendSpamDelay_KeyPress(Object^  sender, Windows::Forms::KeyPres
  }
  
  void MainForm::bSendLog_Click(System::Object^  sender, System::EventArgs^  e) {
@@ -1678,7 +1680,7 @@ index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..becd5cefaa5fbe2436aef4fd4d43765b
  }
  #pragma endregion
  
-@@ -2308,57 +3251,27 @@ System::Void MainForm::cbAP_CheckedChanged(System::Object^ sender, System::Event
+@@ -2308,57 +3253,27 @@ System::Void MainForm::cbAP_CheckedChanged(System::Object^ sender, System::Event
  #pragma endregion
  
  void MainForm::tPacketLog_Tick(System::Object^  sender, System::EventArgs^  e) {
@@ -1755,7 +1757,7 @@ index 3c102b28b1e8b652b42f384a1aad7aa5654f548b..becd5cefaa5fbe2436aef4fd4d43765b
  }
  #pragma endregion
  
-@@ -2927,4 +3840,4 @@ auto StringPool__GetString = (pfnStringPool__GetString)0x0079E993;	//0x00406455;
+@@ -2927,4 +3842,4 @@ auto StringPool__GetString = (pfnStringPool__GetString)0x0079E993;	//0x00406455;
  typedef char**(__stdcall *pfnCItemInfo__GetMapString)(PVOID, PVOID, char*, UINT, const char*);
  auto CItemInfo__GetMapString = (pfnCItemInfo__GetMapString)0x005CF792;*/
  
@@ -2238,22 +2240,19 @@ index f7584c17e2afe678962e559102223f3eef6a89cd..fc97f5686d9791e1f76b73aa5a4bd647
  
  	static bool ValidToAttack()
 diff --git a/Timelapse/Packet.cpp b/Timelapse/Packet.cpp
-index 6803e7cf94351812efcb68569dde3bdc90ac9be8..56cd487dd2484cb2bab613eedab4e2a3998dcef2 100644
+index 6803e7cf94351812efcb68569dde3bdc90ac9be8..7769501aba075148202cb6c153495be9766a5e34 100644
 --- a/Timelapse/Packet.cpp
 +++ b/Timelapse/Packet.cpp
-@@ -1,28 +1,282 @@
+@@ -1,28 +1,27 @@
  #include "Packet.h"
  #include "Structs.h"
 -#include "GeneralFunctions.h"
  #include "Log.h"
-+#include "detours.h"
-+#include <algorithm>
-+#include <deque>
-+#include <set>
++#include <vector>
  
 -// TODO: rewrite in c++ WinSock Style
 -// Hooking client may not be available however hooking windows sockets api will be
-+#pragma comment(lib, "detours.lib")
++using namespace System;
  
 -// Addresses
 -ULONG clientSocketAddr = 0x00BE7914;
@@ -2265,9 +2264,6 @@ index 6803e7cf94351812efcb68569dde3bdc90ac9be8..56cd487dd2484cb2bab613eedab4e2a3
 -PacketSend Send = reinterpret_cast<PacketSend>(COutPacketAddr);
 -typedef void(__thiscall *PacketRecv)(PVOID clientSocket, CInPacket* packet); //Receive packet from client to server
 -PacketRecv Recv = reinterpret_cast<PacketRecv>(CInPacketAddr);
-+using namespace System;
-+
-+// v83 CClientSocket packet entry points.
 +static const ULONG CLIENT_SOCKET_ADDR = 0x00BE7914;
 +static const ULONG COUT_PACKET_ADDR = 0x0049637B;
 +static const ULONG CIN_PACKET_ADDR = 0x004965F1;
@@ -2277,255 +2273,6 @@ index 6803e7cf94351812efcb68569dde3bdc90ac9be8..56cd487dd2484cb2bab613eedab4e2a3
 +typedef void(__thiscall *PacketRecv)(PVOID clientSocket, CInPacket* packet);
 +static PacketSend Send = reinterpret_cast<PacketSend>(COUT_PACKET_ADDR);
 +static PacketRecv Recv = reinterpret_cast<PacketRecv>(CIN_PACKET_ADDR);
-+
-+#pragma managed(push, off)
-+namespace {
-+	const size_t MAX_CAPTURE_BYTES = 8192;
-+	const size_t MAX_QUEUED_PACKETS = 2048;
-+
-+	INIT_ONCE g_packetMonitorInit = INIT_ONCE_STATIC_INIT;
-+	CRITICAL_SECTION g_packetMonitorLock;
-+	std::deque<PacketMonitor::PacketLogEntry> g_sendEntries;
-+	std::deque<PacketMonitor::PacketLogEntry> g_recvEntries;
-+	std::set<USHORT> g_sendBlocked;
-+	std::set<USHORT> g_recvBlocked;
-+	volatile LONG g_sendLogging = FALSE;
-+	volatile LONG g_recvLogging = FALSE;
-+	bool g_sendHookInstalled = false;
-+	bool g_recvHookInstalled = false;
-+
-+	PacketSend g_sendTarget = reinterpret_cast<PacketSend>(COUT_PACKET_ADDR);
-+	PacketRecv g_recvTarget = reinterpret_cast<PacketRecv>(CIN_PACKET_ADDR);
-+
-+	BOOL CALLBACK InitializePacketMonitorOnce(PINIT_ONCE, PVOID, PVOID*) {
-+		InitializeCriticalSection(&g_packetMonitorLock);
-+		return TRUE;
-+	}
-+
-+	void EnsurePacketMonitorInitialized() {
-+		InitOnceExecuteOnce(&g_packetMonitorInit, InitializePacketMonitorOnce, nullptr, nullptr);
-+	}
-+
-+	ULONGLONG CurrentFileTime() {
-+		FILETIME ft = {};
-+		GetSystemTimeAsFileTime(&ft);
-+		ULARGE_INTEGER value = {};
-+		value.LowPart = ft.dwLowDateTime;
-+		value.HighPart = ft.dwHighDateTime;
-+		return value.QuadPart;
-+	}
-+
-+	bool CopyReadableBytes(const BYTE* source, UINT byteCount, std::vector<BYTE>& output) {
-+		if (source == nullptr || byteCount == 0)
-+			return false;
-+
-+		const SIZE_T captureSize = std::min<SIZE_T>(byteCount, MAX_CAPTURE_BYTES);
-+		output.resize(captureSize);
-+		SIZE_T bytesRead = 0;
-+		if (!ReadProcessMemory(GetCurrentProcess(), source, output.data(), captureSize, &bytesRead) || bytesRead == 0) {
-+			output.clear();
-+			return false;
-+		}
-+
-+		output.resize(bytesRead);
-+		return true;
-+	}
-+
-+	bool SnapshotOutPacket(COutPacket* packet, PacketMonitor::PacketLogEntry& entry) {
-+		if (packet == nullptr || packet->Data == nullptr || packet->Size == 0)
-+			return false;
-+
-+		entry.outgoing = true;
-+		entry.timestamp = CurrentFileTime();
-+		entry.originalSize = packet->Size;
-+		entry.offset = packet->Offset;
-+		if (!CopyReadableBytes(packet->Data, packet->Size, entry.bytes))
-+			return false;
-+
-+		entry.header = entry.bytes.size() >= 2
-+			? static_cast<USHORT>(entry.bytes[0] | (entry.bytes[1] << 8))
-+			: 0xFFFF;
-+		return true;
-+	}
-+
-+	bool SnapshotInPacket(CInPacket* packet, PacketMonitor::PacketLogEntry& entry) {
-+		if (packet == nullptr || packet->lpvData == nullptr || packet->Size == 0)
-+			return false;
-+
-+		// A real v83 CInPacket allocation has a four-byte allocator/header
-+		// prefix and starts with uOffset == 4. Packets injected by the editor
-+		// are raw buffers with uOffset == 0, so support both layouts.
-+		const UINT prefix = packet->uOffset >= 4 && packet->Size >= 4 ? 4 : 0;
-+		UINT payloadSize = static_cast<UINT>(packet->Size) - prefix;
-+		if (prefix == 4 && packet->usDataLen > 0 && packet->usDataLen <= payloadSize)
-+			payloadSize = packet->usDataLen;
-+
-+		entry.outgoing = false;
-+		entry.timestamp = CurrentFileTime();
-+		entry.originalSize = payloadSize;
-+		entry.offset = packet->uOffset >= prefix ? packet->uOffset - prefix : packet->uOffset;
-+		const BYTE* payload = reinterpret_cast<const BYTE*>(packet->lpvData) + prefix;
-+		if (!CopyReadableBytes(payload, payloadSize, entry.bytes))
-+			return false;
-+
-+		entry.header = entry.bytes.size() >= 2
-+			? static_cast<USHORT>(entry.bytes[0] | (entry.bytes[1] << 8))
-+			: 0xFFFF;
-+		return true;
-+	}
-+
-+	bool QueueAndCheckBlocked(PacketMonitor::PacketLogEntry& entry) {
-+		EnsurePacketMonitorInitialized();
-+		EnterCriticalSection(&g_packetMonitorLock);
-+
-+		std::set<USHORT>& blocked = entry.outgoing ? g_sendBlocked : g_recvBlocked;
-+		const bool shouldBlock = entry.header != 0xFFFF && blocked.find(entry.header) != blocked.end();
-+		const bool shouldLog = entry.outgoing
-+			? InterlockedCompareExchange(&g_sendLogging, FALSE, FALSE) != FALSE
-+			: InterlockedCompareExchange(&g_recvLogging, FALSE, FALSE) != FALSE;
-+
-+		if (shouldLog) {
-+			std::deque<PacketMonitor::PacketLogEntry>& queue = entry.outgoing ? g_sendEntries : g_recvEntries;
-+			if (queue.size() >= MAX_QUEUED_PACKETS)
-+				queue.pop_front();
-+			queue.push_back(entry);
-+		}
-+
-+		LeaveCriticalSection(&g_packetMonitorLock);
-+		return shouldBlock;
-+	}
-+
-+	void __fastcall SendPacketDetour(PVOID clientSocket, PVOID, COutPacket* packet) {
-+		PacketMonitor::PacketLogEntry entry = {};
-+		const bool hasSnapshot = SnapshotOutPacket(packet, entry);
-+		if (hasSnapshot && QueueAndCheckBlocked(entry))
-+			return;
-+		g_sendTarget(clientSocket, packet);
-+	}
-+
-+	void __fastcall RecvPacketDetour(PVOID clientSocket, PVOID, CInPacket* packet) {
-+		PacketMonitor::PacketLogEntry entry = {};
-+		const bool hasSnapshot = SnapshotInPacket(packet, entry);
-+		if (hasSnapshot && QueueAndCheckBlocked(entry))
-+			return;
-+		g_recvTarget(clientSocket, packet);
-+	}
-+
-+	bool ChangeDetour(bool attach, PVOID* target, PVOID detour) {
-+		if (DetourTransactionBegin() != NO_ERROR)
-+			return false;
-+		if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR) {
-+			DetourTransactionAbort();
-+			return false;
-+		}
-+
-+		const LONG operation = attach ? DetourAttach(target, detour) : DetourDetach(target, detour);
-+		if (operation != NO_ERROR) {
-+			DetourTransactionAbort();
-+			return false;
-+		}
-+
-+		if (DetourTransactionCommit() != NO_ERROR) {
-+			DetourTransactionAbort();
-+			return false;
-+		}
-+		return true;
-+	}
-+
-+	bool EnsureHookInstalled(bool outgoing) {
-+		EnsurePacketMonitorInitialized();
-+		EnterCriticalSection(&g_packetMonitorLock);
-+		bool& installed = outgoing ? g_sendHookInstalled : g_recvHookInstalled;
-+		bool ok = true;
-+		if (!installed) {
-+			ok = outgoing
-+				? ChangeDetour(true, reinterpret_cast<PVOID*>(&g_sendTarget), reinterpret_cast<PVOID>(SendPacketDetour))
-+				: ChangeDetour(true, reinterpret_cast<PVOID*>(&g_recvTarget), reinterpret_cast<PVOID>(RecvPacketDetour));
-+			if (ok)
-+				installed = true;
-+		}
-+		LeaveCriticalSection(&g_packetMonitorLock);
-+		return ok;
-+	}
-+}
-+
-+bool PacketMonitor::SetLoggingEnabled(bool outgoing, bool enabled) {
-+	if (enabled && !EnsureHookInstalled(outgoing))
-+		return false;
-+
-+	if (outgoing)
-+		InterlockedExchange(&g_sendLogging, enabled ? TRUE : FALSE);
-+	else
-+		InterlockedExchange(&g_recvLogging, enabled ? TRUE : FALSE);
-+	return true;
-+}
-+
-+bool PacketMonitor::IsLoggingEnabled(bool outgoing) {
-+	return outgoing
-+		? InterlockedCompareExchange(&g_sendLogging, FALSE, FALSE) != FALSE
-+		: InterlockedCompareExchange(&g_recvLogging, FALSE, FALSE) != FALSE;
-+}
-+
-+void PacketMonitor::Drain(bool outgoing, std::vector<PacketLogEntry>& entries) {
-+	EnsurePacketMonitorInitialized();
-+	EnterCriticalSection(&g_packetMonitorLock);
-+	std::deque<PacketLogEntry>& queue = outgoing ? g_sendEntries : g_recvEntries;
-+	entries.reserve(entries.size() + queue.size());
-+	while (!queue.empty()) {
-+		entries.push_back(queue.front());
-+		queue.pop_front();
-+	}
-+	LeaveCriticalSection(&g_packetMonitorLock);
-+}
-+
-+void PacketMonitor::Clear(bool outgoing) {
-+	EnsurePacketMonitorInitialized();
-+	EnterCriticalSection(&g_packetMonitorLock);
-+	(outgoing ? g_sendEntries : g_recvEntries).clear();
-+	LeaveCriticalSection(&g_packetMonitorLock);
-+}
-+
-+bool PacketMonitor::SetHeaderBlocked(bool outgoing, USHORT header, bool blocked) {
-+	if (blocked && !EnsureHookInstalled(outgoing))
-+		return false;
-+
-+	EnsurePacketMonitorInitialized();
-+	EnterCriticalSection(&g_packetMonitorLock);
-+	std::set<USHORT>& headers = outgoing ? g_sendBlocked : g_recvBlocked;
-+	if (blocked)
-+		headers.insert(header);
-+	else
-+		headers.erase(header);
-+	LeaveCriticalSection(&g_packetMonitorLock);
-+	return true;
-+}
-+
-+std::vector<USHORT> PacketMonitor::GetBlockedHeaders(bool outgoing) {
-+	EnsurePacketMonitorInitialized();
-+	EnterCriticalSection(&g_packetMonitorLock);
-+	const std::set<USHORT>& headers = outgoing ? g_sendBlocked : g_recvBlocked;
-+	std::vector<USHORT> result(headers.begin(), headers.end());
-+	LeaveCriticalSection(&g_packetMonitorLock);
-+	return result;
-+}
-+
-+void PacketMonitor::Shutdown() {
-+	EnsurePacketMonitorInitialized();
-+	InterlockedExchange(&g_sendLogging, FALSE);
-+	InterlockedExchange(&g_recvLogging, FALSE);
-+
-+	EnterCriticalSection(&g_packetMonitorLock);
-+	if (g_sendHookInstalled && ChangeDetour(false, reinterpret_cast<PVOID*>(&g_sendTarget), reinterpret_cast<PVOID>(SendPacketDetour)))
-+		g_sendHookInstalled = false;
-+	if (g_recvHookInstalled && ChangeDetour(false, reinterpret_cast<PVOID*>(&g_recvTarget), reinterpret_cast<PVOID>(RecvPacketDetour)))
-+		g_recvHookInstalled = false;
-+	g_sendEntries.clear();
-+	g_recvEntries.clear();
-+	g_sendBlocked.clear();
-+	g_recvBlocked.clear();
-+	LeaveCriticalSection(&g_packetMonitorLock);
-+}
-+#pragma managed(pop)
  
  void writeByte(String^ %packet, BYTE byte) {
  	packet += byte.ToString("X2") + " ";
@@ -2538,7 +2285,7 @@ index 6803e7cf94351812efcb68569dde3bdc90ac9be8..56cd487dd2484cb2bab613eedab4e2a3
  }
  
  void writeString(String^ %packet, String^ str) {
-@@ -32,85 +286,95 @@ void writeString(String^ %packet, String^ str) {
+@@ -32,85 +31,95 @@ void writeString(String^ %packet, String^ str) {
  }
  
  void writeInt(String^ %packet, int num) {
@@ -2690,44 +2437,17 @@ index 6803e7cf94351812efcb68569dde3bdc90ac9be8..56cd487dd2484cb2bab613eedab4e2a3
 +	}
  }
 diff --git a/Timelapse/Packet.h b/Timelapse/Packet.h
-index 4823acd62b7f899f5ad01bed1cda2b16e3511363..2a75d7e45920277847d32109fca667794ce08a34 100644
+index 4823acd62b7f899f5ad01bed1cda2b16e3511363..b25c271f705efbb3d117a5cc6f8351a93905ab01 100644
 --- a/Timelapse/Packet.h
 +++ b/Timelapse/Packet.h
-@@ -1,8 +1,33 @@
+@@ -1,5 +1,6 @@
  #pragma once
  #include <Windows.h>
-+#include <vector>
++#include "PacketMonitor.h"
  
  using namespace System;
  
-+#pragma managed(push, off)
-+namespace PacketMonitor {
-+	struct PacketLogEntry {
-+		bool outgoing;
-+		ULONGLONG timestamp;
-+		USHORT header;
-+		UINT originalSize;
-+		UINT offset;
-+		std::vector<BYTE> bytes;
-+	};
-+
-+	// The monitor uses Detours rather than the old five-byte JMP patch.  It
-+	// owns the copied packet bytes, so the UI never dereferences a packet
-+	// object that has already gone out of scope on the MapleStory thread.
-+	bool SetLoggingEnabled(bool outgoing, bool enabled);
-+	bool IsLoggingEnabled(bool outgoing);
-+	void Drain(bool outgoing, std::vector<PacketLogEntry>& entries);
-+	void Clear(bool outgoing);
-+	bool SetHeaderBlocked(bool outgoing, USHORT header, bool blocked);
-+	std::vector<USHORT> GetBlockedHeaders(bool outgoing);
-+	void Shutdown();
-+}
-+#pragma managed(pop)
-+
- bool SendPacket(String^ packetStr);
- bool RecvPacket(String^ packetStr);
- //void __stdcall SendPacketHook();
-@@ -12,4 +37,4 @@ void writeBytes(String^ %packet, array<BYTE>^ bytes);
+@@ -12,4 +13,4 @@ void writeBytes(String^ %packet, array<BYTE>^ bytes);
  void writeString(String^ %packet, String^ str);
  void writeInt(String^ %packet, int num);
  void writeShort(String^ %packet, short num);
@@ -3026,7 +2746,7 @@ index abc51fd626074026909f9fe8f4668260b106a6f0..c9cdf2df6cd3a827d9caa76ab5eba028
 \ No newline at end of file
 +};
 diff --git a/Timelapse/Timelapse.vcxproj b/Timelapse/Timelapse.vcxproj
-index 8e3fefdc62d4e2206dfede02d464da81fec06b78..24d00d8a26f4349f953bf33df7fea192266d40c8 100644
+index 8e3fefdc62d4e2206dfede02d464da81fec06b78..efc4eeddcd871b2930437e1f1325a3f4461406db 100644
 --- a/Timelapse/Timelapse.vcxproj
 +++ b/Timelapse/Timelapse.vcxproj
 @@ -135,6 +135,7 @@
@@ -3037,3 +2757,79 @@ index 8e3fefdc62d4e2206dfede02d464da81fec06b78..24d00d8a26f4349f953bf33df7fea192
      <Reference Include="System.Windows.Forms" />
      <Reference Include="System.Xml" />
    </ItemGroup>
+@@ -142,9 +143,12 @@
+     <ClCompile Include="Inventory.cpp" />
+     <ClCompile Include="Log.cpp" />
+     <ClCompile Include="MainForm.cpp" />
+-    <ClCompile Include="Mouse.cpp" />
+-    <ClCompile Include="Packet.cpp" />
+-    <ClCompile Include="Settings.cpp" />
++	<ClCompile Include="Mouse.cpp" />
++	<ClCompile Include="Packet.cpp" />
++	<ClCompile Include="PacketMonitor.cpp">
++	  <CompileAsManaged>false</CompileAsManaged>
++	</ClCompile>
++	<ClCompile Include="Settings.cpp" />
+   </ItemGroup>
+   <ItemGroup>
+     <ClInclude Include="Hooks.h" />
+@@ -156,7 +160,8 @@
+     <ClInclude Include="MapleFunctions.h" />
+     <ClInclude Include="Memory.h" />
+     <ClInclude Include="Mouse.h" />
+-    <ClInclude Include="Packet.h" />
++	<ClInclude Include="Packet.h" />
++	<ClInclude Include="PacketMonitor.h" />
+     <ClInclude Include="Addresses.h" />
+     <ClInclude Include="MainForm.h">
+       <FileType>CppForm</FileType>
+@@ -188,4 +193,4 @@
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+   <ImportGroup Label="ExtensionTargets">
+   </ImportGroup>
+-</Project>
+\ No newline at end of file
++</Project>
+diff --git a/Timelapse/Timelapse.vcxproj.filters b/Timelapse/Timelapse.vcxproj.filters
+index addfa9e07853701738a9588738b52f14f165c8b1..4fa6e74c58605ce249eb2d3a7e767a04dc634a77 100644
+--- a/Timelapse/Timelapse.vcxproj.filters
++++ b/Timelapse/Timelapse.vcxproj.filters
+@@ -24,9 +24,12 @@
+     <ClInclude Include="Macro.h">
+       <Filter>Header Files</Filter>
+     </ClInclude>
+-    <ClInclude Include="Packet.h">
+-      <Filter>Header Files</Filter>
+-    </ClInclude>
++	<ClInclude Include="Packet.h">
++	  <Filter>Header Files</Filter>
++	</ClInclude>
++	<ClInclude Include="PacketMonitor.h">
++	  <Filter>Header Files</Filter>
++	</ClInclude>
+     <ClInclude Include="Structs.h">
+       <Filter>Header Files</Filter>
+     </ClInclude>
+@@ -68,9 +71,12 @@
+     <ClCompile Include="MainForm.cpp">
+       <Filter>Source Files</Filter>
+     </ClCompile>
+-    <ClCompile Include="Packet.cpp">
+-      <Filter>Source Files</Filter>
+-    </ClCompile>
++	<ClCompile Include="Packet.cpp">
++	  <Filter>Source Files</Filter>
++	</ClCompile>
++	<ClCompile Include="PacketMonitor.cpp">
++	  <Filter>Source Files</Filter>
++	</ClCompile>
+     <ClCompile Include="Settings.cpp">
+       <Filter>Source Files</Filter>
+     </ClCompile>
+@@ -109,4 +115,4 @@
+       <Filter>Libs</Filter>
+     </Library>
+   </ItemGroup>
+-</Project>
+\ No newline at end of file
++</Project>
