@@ -1,0 +1,163 @@
+diff --git a/Timelapse/Addresses.h b/Timelapse/Addresses.h
+index a7a2e35..726f4ed 100644
+--- a/Timelapse/Addresses.h
++++ b/Timelapse/Addresses.h
+@@ -172,6 +172,16 @@ ULONG LoginBase = 0xBEDED4; //CLogin
+ ULONG OFS_LoginStep = 0x168; //0 = login screen or logged in, 1 = Select World/Channel, 2 = Select Char
+ ULONG OFS_LoginScreen = 0x174; //255 == login screen, 1 == loggin in, 0 = logged in
+ 
++// CUILogin and its two CCtrlEdit members. These were verified against the
++// supplied BeiDou.exe (GMS v83). Unlike screen coordinates, these object
++// offsets are unchanged by the client's high-resolution ijl15.dll patches.
++ULONG UILoginBase = 0xBEDA60;
++ULONG OFS_UILoginUsernameEdit = 0xCC;
++ULONG OFS_UILoginPasswordEdit = 0xD4;
++ULONG CCtrlEditSetTextAddr = 0x004CC512;
++ULONG CUILoginVTable = 0x00AF7940;
++ULONG CCtrlEditVTable = 0x00AF2BA8;
++
+ ULONG UIInfoBase = 0xBEC208; 
+ ULONG OFS_HP = 0xD18;
+ ULONG OFS_MP = OFS_HP + 4;
+@@ -253,4 +263,4 @@ ULONG OFS_MobCount = 0x24;
+ 
+ ULONG CItemInfo = 0xBE78D8;
+ ULONG StringPool = 0xBF0D0C;
+-#pragma endregion
+\ No newline at end of file
++#pragma endregion
+diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
+index c09c96a..f864957 100644
+--- a/Timelapse/MainForm.cpp
++++ b/Timelapse/MainForm.cpp
+@@ -677,29 +677,50 @@ static void TapPhysicalKeyRepeated(WORD virtualKey, int count) {
+ 	}
+ }
+ 
+-static bool ClickMapleClientPoint(int clientX, int clientY, bool doubleClick) {
+-	if (!FocusMapleWindow())
++#pragma unmanaged
++static bool SetMapleLoginFieldNative(ULONG fieldOffset, const char* text) {
++	if (text == nullptr)
+ 		return false;
+ 
+-	POINT point = { clientX, clientY };
+-	if (!ClientToScreen(GlobalVars::mapleWindow, &point))
+-		return false;
++	__try {
++		// Refuse to call into an unexpected client build. The two vtables and
++		// SetText prologue below are exact values from the supplied BeiDou.exe.
++		if (*(ULONG*)CCtrlEditSetTextAddr != 0x0424448B)
++			return false;
+ 
+-	MouseInput::Mouse mouse;
+-	mouse.moveTo(point.x, point.y, false, false);
+-	Sleep(40);
+-	if (doubleClick)
+-		mouse.doubleLeftClick();
+-	else
+-		mouse.leftClick();
+-	return true;
++		ULONG uiLogin = *(ULONG*)UILoginBase;
++		if (uiLogin == 0 || *(ULONG*)uiLogin != CUILoginVTable)
++			return false;
++
++		ULONG edit = *(ULONG*)(uiLogin + fieldOffset);
++		if (edit == 0 || *(ULONG*)edit != CCtrlEditVTable)
++			return false;
++
++		typedef void(__thiscall *pfnCCtrlEdit__SetText)(PVOID, const char*);
++		static pfnCCtrlEdit__SetText CCtrlEdit__SetText =
++			reinterpret_cast<pfnCCtrlEdit__SetText>(CCtrlEditSetTextAddr);
++		CCtrlEdit__SetText((PVOID)edit, text);
++		return true;
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
+ }
++#pragma managed
+ 
+-static void ClearFocusedLoginField() {
+-	SendPhysicalKey(VK_CONTROL, false);
+-	TapPhysicalKey('A');
+-	SendPhysicalKey(VK_CONTROL, true);
+-	TapPhysicalKey(VK_BACK);
++static bool SetMapleLoginField(String^ text, ULONG fieldOffset) {
++	if (String::IsNullOrEmpty(text))
++		return false;
++
++	IntPtr ansiText = Runtime::InteropServices::Marshal::StringToHGlobalAnsi(text);
++	bool result = false;
++	try {
++		result = SetMapleLoginFieldNative(fieldOffset, (const char*)ansiText.ToPointer());
++	}
++	finally {
++		Runtime::InteropServices::Marshal::FreeHGlobal(ansiText);
++	}
++	return result;
+ }
+ 
+ static bool TypeCredentialText(String^ text) {
+@@ -834,37 +855,38 @@ void ProcessAutoLogin() {
+ 		switch (GlobalRefs::autoLoginPhase) {
+ 			case AUTOLOGIN_IDLE:
+ 			case AUTOLOGIN_USERNAME:
+-				// Coordinates are client-relative and match the supplied Chinese
+-				// SoulMS login panel, so moving the game window is harmless.
+-				if (!ClickMapleClientPoint(125, 159, false)) {
+-					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(2);
++				if (!SetMapleLoginField(username, OFS_UILoginUsernameEdit)) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++					SetAutoLoginStatus("waiting for the internal username control");
+ 					return;
+ 				}
+-				ClearFocusedLoginField();
+-				TypeCredentialText(username);
+ 				GlobalRefs::autoLoginPhase = AUTOLOGIN_PASSWORD;
+-				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(350);
+-				SetAutoLoginStatus("username entered");
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(150);
++				SetAutoLoginStatus("username written to the internal control");
+ 				return;
+ 
+ 			case AUTOLOGIN_PASSWORD:
+-				if (!ClickMapleClientPoint(125, 190, false)) {
+-					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(2);
++				if (!SetMapleLoginField(password, OFS_UILoginPasswordEdit)) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(500);
++					SetAutoLoginStatus("waiting for the internal password control");
+ 					return;
+ 				}
+-				ClearFocusedLoginField();
+-				TypeCredentialText(password);
+ 				GlobalRefs::autoLoginPhase = AUTOLOGIN_CONNECT;
+-				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(350);
+-				SetAutoLoginStatus("password entered");
++				GlobalRefs::autoLoginNextAction = DateTime::Now.AddMilliseconds(150);
++				SetAutoLoginStatus("password written to the internal control");
+ 				return;
+ 
+ 			case AUTOLOGIN_CONNECT:
+-				ClickMapleClientPoint(258, 158, false);
++				if (!FocusMapleWindow()) {
++					GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(2);
++					SetAutoLoginStatus("waiting for the MapleStory window");
++					return;
++				}
++				TapPhysicalKey(VK_RETURN);
+ 				GlobalRefs::autoLoginAttempts++;
+ 				GlobalRefs::autoLoginPhase = AUTOLOGIN_WAIT_LOGIN;
+ 				GlobalRefs::autoLoginNextAction = DateTime::Now.AddSeconds(8);
+-				SetAutoLoginStatus("Connect clicked (attempt " + GlobalRefs::autoLoginAttempts.ToString() + ")");
++				SetAutoLoginStatus("credentials submitted (attempt " + GlobalRefs::autoLoginAttempts.ToString() + ")");
+ 				return;
+ 
+ 			case AUTOLOGIN_WAIT_LOGIN:
+@@ -3436,4 +3458,4 @@ auto StringPool__GetString = (pfnStringPool__GetString)0x0079E993;	//0x00406455;
+ typedef char**(__stdcall *pfnCItemInfo__GetMapString)(PVOID, PVOID, char*, UINT, const char*);
+ auto CItemInfo__GetMapString = (pfnCItemInfo__GetMapString)0x005CF792;*/
+ 
+-#pragma endregion
+\ No newline at end of file
++#pragma endregion
