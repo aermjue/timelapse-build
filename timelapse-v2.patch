@@ -1,16 +1,3 @@
-From db04c26e4c59cb4d744c2c53592dac171fc5ef39 Mon Sep 17 00:00:00 2001
-From: Codex <codex@local>
-Date: Sat, 15 Aug 2026 20:05:28 -0400
-Subject: [PATCH] Fix settings, auto buff, and mouse teleport
-
----
- Timelapse/Log.cpp      |   1 +
- Timelapse/Macro.h      | 104 +++++++++++++++++++++++++-------------
- Timelapse/MainForm.cpp | 111 ++++++++++++++++++++++++++++++++++-------
- Timelapse/MainForm.h   |   3 +-
- Timelapse/Settings.cpp |  97 +++++++++++++++++++++++++++--------
- 5 files changed, 240 insertions(+), 76 deletions(-)
-
 diff --git a/Timelapse/Log.cpp b/Timelapse/Log.cpp
 index 3d84ec7..2c2d0ae 100644
 --- a/Timelapse/Log.cpp
@@ -253,7 +240,7 @@ index 023ca14..d484aca 100644
  		}
  	}
 diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
-index 3c102b2..e32c75d 100644
+index 3c102b2..088f7d2 100644
 --- a/Timelapse/MainForm.cpp
 +++ b/Timelapse/MainForm.cpp
 @@ -24,6 +24,7 @@ ref struct GlobalRefs {
@@ -264,7 +251,34 @@ index 3c102b2..e32c75d 100644
  	static bool bWallVac = false, bDupeX = false, bMMC = false, bUEMI = false;
  	static UINT cccsTimerTickCount = 0;
  	static bool isDragging = false, isEmbedding = false;
-@@ -534,6 +535,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
+@@ -165,11 +166,24 @@ void MainForm::pnlFull_MouseMove(Object^  sender, Windows::Forms::MouseEventArgs
+ 
+ #pragma region ToolStrip
+ void MainForm::loadSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+-	Settings::Deserialize(this, Settings::GetSettingsPath());
++	String^ settingsPath = Settings::GetSettingsPath();
++	if (!File::Exists(settingsPath)) {
++		MessageBox::Show("No saved settings file was found at:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++		return;
++	}
++
++	if (Settings::Deserialize(this, settingsPath))
++		MessageBox::Show("Settings loaded successfully from:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++	else
++		MessageBox::Show("The settings file exists but could not be loaded. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
+ }
+ 
+ void MainForm::saveSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+-	Settings::Serialize(this, Settings::GetSettingsPath());
++	String^ settingsPath = Settings::GetSettingsPath();
++	if (Settings::Serialize(this, settingsPath))
++		MessageBox::Show("Settings saved successfully to:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++	else
++		MessageBox::Show("Settings could not be saved. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
+ }
+ 
+ void MainForm::closeMapleStoryToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
+@@ -534,6 +548,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
  static int keyCollection[] = { 0x10, 0x11, 0x12, 0x20, 0x2D, 0x2E, 0x24, 0x23, 0x21, 0x22, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51,
  0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39 };
  
@@ -316,7 +330,7 @@ index 3c102b2..e32c75d 100644
  //Check if keypress is valid
  static bool isKeyValid(Object^ sender, Windows::Forms::KeyPressEventArgs^ e, bool isSigned) {
  	bool result = true;
-@@ -704,51 +750,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
+@@ -704,51 +763,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
  
  #pragma region Auto Buffs
  void MainForm::bBuffAdd_Click(Object^  sender, EventArgs^  e) {
@@ -393,17 +407,20 @@ index 3c102b2..e32c75d 100644
  }
  
  void MainForm::tbBuffInterval_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
-@@ -968,25 +1024,35 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
+@@ -968,25 +1037,38 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
  }
  
  void ClickTeleport() {
 +	bool wasLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
  	while (GlobalRefs::bClickTeleport) {
 -		if (ReadPointer(InputBase, OFS_MouseAnimation) == 12)
-+		bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-+		if (isLeftButtonDown && !wasLeftButtonDown && HelperFuncs::IsInGame())
- 			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
 -		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbClickTeleport->Text));
++		bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
++		int mouseX = 0, mouseY = 0;
++		if (isLeftButtonDown && !wasLeftButtonDown && HelperFuncs::IsInGame() &&
++			TryGetMouseWorldPosition(mouseX, mouseY) && isPosValid(mouseX, mouseY))
++			Teleport(mouseX, mouseY);
 +		wasLeftButtonDown = isLeftButtonDown;
 +		Sleep(GlobalRefs::clickTeleportDelay);
  	}
@@ -413,9 +430,11 @@ index 3c102b2..e32c75d 100644
  void MouseTeleport() {
  	while (GlobalRefs::bMouseTeleport) {
 -		if (ReadPointer(InputBase, OFS_MouseAnimation) == 00)
-+		if (HelperFuncs::IsInGame())
- 			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
+-			Teleport(ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX), ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY));
 -		Sleep(Convert::ToUInt32(MainForm::TheInstance->tbMouseTeleport->Text));
++		int mouseX = 0, mouseY = 0;
++		if (HelperFuncs::IsInGame() && TryGetMouseWorldPosition(mouseX, mouseY) && isPosValid(mouseX, mouseY))
++			Teleport(mouseX, mouseY);
 +		Sleep(GlobalRefs::mouseTeleportDelay);
  	}
  	ExitThread(0);
@@ -433,7 +452,7 @@ index 3c102b2..e32c75d 100644
  		GlobalRefs::bClickTeleport = true;
  		NewThread(ClickTeleport);
  	}
-@@ -996,6 +1062,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+@@ -996,6 +1078,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
   
  void MainForm::cbMouseTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
  	if (this->cbMouseTeleport->Checked) {
@@ -468,30 +487,183 @@ index 7e68e46..43285de 100644
  			this->lvBuffHeaderInterval->Width = 80;
  			// 
  			// tabPage12
-diff --git a/Timelapse/Settings.cpp b/Timelapse/Settings.cpp
-index 7dbfe8b..2a3c5dd 100644
---- a/Timelapse/Settings.cpp
-+++ b/Timelapse/Settings.cpp
-@@ -49,28 +49,41 @@ void Settings::Serialize(String^ path, XmlSerializer^ serializer, Object^ object
+diff --git a/Timelapse/MapleFunctions.h b/Timelapse/MapleFunctions.h
+index f7584c1..7774999 100644
+--- a/Timelapse/MapleFunctions.h
++++ b/Timelapse/MapleFunctions.h
+@@ -30,6 +30,130 @@ static ULONG GetMSThreadID() {
+ 	return GetWindowThreadProcessId(GlobalVars::mapleWindow, nullptr);
  }
  
- void Settings::Serialize(Control^ c, String^ XmlFileName) {
++#pragma unmanaged
++// Resolve the cursor to MapleStory world coordinates.  Some v83 clients
++// (including the BeiDou-based client) store these as floats on a different
++// CInputSystem chain than the original Timelapse offsets.
++static bool GetCursorInMapleClient(POINT& clientPoint, int& clientWidth, int& clientHeight) {
++	HWND mapleWindow = GlobalVars::mapleWindow;
++	if (mapleWindow == nullptr)
++		mapleWindow = GetMSWindowHandle();
++	if (mapleWindow == nullptr || !IsWindow(mapleWindow))
++		return false;
++
++	POINT screenPoint;
++	RECT clientRect;
++	if (!GetCursorPos(&screenPoint) || !ScreenToClient(mapleWindow, &screenPoint) || !GetClientRect(mapleWindow, &clientRect))
++		return false;
++
++	clientWidth = clientRect.right - clientRect.left;
++	clientHeight = clientRect.bottom - clientRect.top;
++	if (clientWidth <= 0 || clientHeight <= 0 || screenPoint.x < 0 || screenPoint.y < 0 ||
++		screenPoint.x >= clientWidth || screenPoint.y >= clientHeight)
++		return false;
++
++	clientPoint = screenPoint;
++	return true;
++}
++
++static bool IsMouseWorldPositionPlausible(int x, int y) {
++	if (x < -1000000 || x > 1000000 || y < -1000000 || y > 1000000)
++		return false;
++
++	int left = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_LeftWall);
++	int right = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_RightWall);
++	int top = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_TopWall);
++	int bottom = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_BottomWall);
++	if (right > left && bottom > top)
++		return x >= left - 4096 && x <= right + 4096 && y >= top - 4096 && y <= bottom + 4096;
++
++	return true;
++}
++
++static bool TryGetBeiDouMouseWorldPosition(int& x, int& y) {
++	__try {
++		ULONG inputSystem = *(ULONG*)InputBase;
++		if (inputSystem == 0) return false;
++		ULONG mouseContext = *(ULONG*)(inputSystem + 0x97C);
++		if (mouseContext == 0) return false;
++		ULONG mouseNode = *(ULONG*)(mouseContext + 0x8);
++		if (mouseNode == 0) return false;
++		ULONG worldPoint = *(ULONG*)(mouseNode + 0x78);
++		if (worldPoint == 0) return false;
++
++		float worldX = *(float*)(worldPoint);
++		float worldY = *(float*)(worldPoint + 4);
++		if (worldX != worldX || worldY != worldY || worldX < -1000000.0f || worldX > 1000000.0f ||
++			worldY < -1000000.0f || worldY > 1000000.0f)
++			return false;
++
++		x = (int)(worldX >= 0.0f ? worldX + 0.5f : worldX - 0.5f);
++		y = (int)(worldY >= 0.0f ? worldY + 0.5f : worldY - 0.5f);
++		return IsMouseWorldPositionPlausible(x, y);
++	}
++	__except (EXCEPTION_EXECUTE_HANDLER) {
++		return false;
++	}
++}
++
++static bool TryGetLegacyMouseWorldPosition(int& x, int& y) {
++	x = (int)ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX);
++	y = (int)ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY);
++	return IsMouseWorldPositionPlausible(x, y);
++}
++
++// Last-resort conversion for clients that expose neither known memory chain.
++// It maps the Windows cursor through the camera area using the character and
++// map bounds, so Mouse Teleport still follows the real cursor.
++static bool TryGetApproximateMouseWorldPosition(const POINT& clientPoint, int clientWidth, int clientHeight, int& x, int& y) {
++	int left = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_LeftWall);
++	int right = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_RightWall);
++	int top = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_TopWall);
++	int bottom = ReadPointerSignedInt(CWvsPhysicalSpace2DBase, OFS_BottomWall);
++	int charX = ReadPointerSignedInt(UserLocalBase, OFS_CharX);
++	int charY = ReadPointerSignedInt(UserLocalBase, OFS_CharY);
++	if (right <= left || bottom <= top)
++		return false;
++
++	int mapWidth = right - left;
++	int mapHeight = bottom - top;
++	int cameraLeft = charX - (clientWidth / 2);
++	int cameraTop = charY - (clientHeight / 2);
++
++	if (mapWidth > clientWidth) {
++		if (cameraLeft < left) cameraLeft = left;
++		if (cameraLeft > right - clientWidth) cameraLeft = right - clientWidth;
++	}
++	else {
++		cameraLeft = left - ((clientWidth - mapWidth) / 2);
++	}
++
++	if (mapHeight > clientHeight) {
++		if (cameraTop < top) cameraTop = top;
++		if (cameraTop > bottom - clientHeight) cameraTop = bottom - clientHeight;
++	}
++	else {
++		cameraTop = top - ((clientHeight - mapHeight) / 2);
++	}
++
++	x = cameraLeft + clientPoint.x;
++	y = cameraTop + clientPoint.y;
++	return IsMouseWorldPositionPlausible(x, y);
++}
++
++static bool TryGetMouseWorldPosition(int& x, int& y) {
++	POINT clientPoint;
++	int clientWidth = 0, clientHeight = 0;
++	if (!GetCursorInMapleClient(clientPoint, clientWidth, clientHeight))
++		return false;
++
++	if (TryGetBeiDouMouseWorldPosition(x, y))
++		return true;
++	if (TryGetLegacyMouseWorldPosition(x, y))
++		return true;
++	return TryGetApproximateMouseWorldPosition(clientPoint, clientWidth, clientHeight, x, y);
++}
++
+ #pragma managed
+ //Get MS ProcessID
+ static String^ GetMSProcID() {
+@@ -239,17 +363,22 @@ namespace PointerFuncs {
+ 
+ 	//Retrieve Mouse Position
+ 	static String^ getMousePos() {
+-		return "(" + ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX).ToString() + ", " + ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY).ToString() + ")";
++		int x = 0, y = 0;
++		if (!TryGetMouseWorldPosition(x, y))
++			return "(Outside game)";
++		return "(" + Convert::ToString(x) + ", " + Convert::ToString(y) + ")";
+ 	}
+ 
+ 	//Retrieve Mouse X Position
+ 	static String^ getMousePosX() {
+-		return ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseX).ToString();
++		int x = 0, y = 0;
++		return TryGetMouseWorldPosition(x, y) ? Convert::ToString(x) : "N/A";
+ 	}
+ 
+ 	//Retrieve Mouse Y Position
+ 	static String^ getMousePosY() {
+-		return ReadMultiPointerSigned(InputBase, 2, OFS_MouseLocation, OFS_MouseY).ToString();
++		int x = 0, y = 0;
++		return TryGetMouseWorldPosition(x, y) ? Convert::ToString(y) : "N/A";
+ 	}
+ 
+ 	//Retrieve Char Animation
+diff --git a/Timelapse/Settings.cpp b/Timelapse/Settings.cpp
+index 7dbfe8b..f534a8d 100644
+--- a/Timelapse/Settings.cpp
++++ b/Timelapse/Settings.cpp
+@@ -48,29 +48,46 @@ void Settings::Serialize(String^ path, XmlSerializer^ serializer, Object^ object
+ 	}
+ }
+ 
+-void Settings::Serialize(Control^ c, String^ XmlFileName) {
 -	XmlTextWriter^ xmlSerializedForm = gcnew XmlTextWriter(XmlFileName, System::Text::Encoding::Default);
++bool Settings::Serialize(Control^ c, String^ XmlFileName) {
 +	XmlTextWriter^ xmlSerializedForm = nullptr;
  
 -	xmlSerializedForm->Formatting = Formatting::Indented;
 -	xmlSerializedForm->WriteStartDocument();
 -	xmlSerializedForm->WriteStartElement("Timelapse");
--
--	// enumerate all controls on the form, and serialize them as appropriate
--	AddChildControls(xmlSerializedForm, c);
--
--	xmlSerializedForm->WriteEndElement();
--	xmlSerializedForm->WriteEndDocument();
--	xmlSerializedForm->Flush();
--	xmlSerializedForm->Close();
--
--	Log::WriteLine("Saved " + XmlFileName);
 +	try {
 +		String^ directory = Path::GetDirectoryName(XmlFileName);
 +		if (!String::IsNullOrWhiteSpace(directory))
@@ -501,23 +673,34 @@ index 7dbfe8b..2a3c5dd 100644
 +		xmlSerializedForm->Formatting = Formatting::Indented;
 +		xmlSerializedForm->WriteStartDocument();
 +		xmlSerializedForm->WriteStartElement("Timelapse");
-+
+ 
+-	// enumerate all controls on the form, and serialize them as appropriate
+-	AddChildControls(xmlSerializedForm, c);
 +		// Enumerate all supported controls on the form.
 +		AddChildControls(xmlSerializedForm, c);
-+
+ 
+-	xmlSerializedForm->WriteEndElement();
+-	xmlSerializedForm->WriteEndDocument();
+-	xmlSerializedForm->Flush();
+-	xmlSerializedForm->Close();
 +		xmlSerializedForm->WriteEndElement();
 +		xmlSerializedForm->WriteEndDocument();
 +		xmlSerializedForm->Flush();
++		xmlSerializedForm->Close();
++		xmlSerializedForm = nullptr;
 +		Log::WriteLine("Saved " + XmlFileName);
++		return File::Exists(XmlFileName) && (gcnew FileInfo(XmlFileName))->Length > 0;
 +	}
 +	catch (Exception^ ex) {
 +		Log::WriteLine("Exception occured while saving settings to " + XmlFileName + " : " + ex->Message);
-+		MessageBox::Show("Unable to save settings: " + ex->Message, "Timelapse", MessageBoxButtons::OK, MessageBoxIcon::Error);
 +	}
 +	finally {
 +		if (xmlSerializedForm != nullptr)
 +			xmlSerializedForm->Close();
 +	}
+ 
+-	Log::WriteLine("Saved " + XmlFileName);
++	return false;
  }
  
  bool Settings::isExcluded(Control^ ctrl) {
@@ -529,7 +712,7 @@ index 7dbfe8b..2a3c5dd 100644
  		return true;
  
  	return false;
-@@ -80,10 +93,15 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+@@ -80,10 +97,15 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
  	for each(Control^ childCtrl in c->Controls) {
  		auto ctrlType = childCtrl->GetType();
  		auto ctrlName = childCtrl->Name;
@@ -547,7 +730,7 @@ index 7dbfe8b..2a3c5dd 100644
  			// serialize this control
  			xmlSerializedForm->WriteStartElement("Control");
  			xmlSerializedForm->WriteAttributeString("Name", ctrlName);
-@@ -108,9 +126,24 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+@@ -108,9 +130,24 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
  					xmlSerializedForm->WriteAttributeString(listBoxItemNmbStr, listBoxItemStr);
  				}
  			}
@@ -573,16 +756,49 @@ index 7dbfe8b..2a3c5dd 100644
  				AddChildControls(xmlSerializedForm, childCtrl);
  
  			xmlSerializedForm->WriteEndElement(); // Control
-@@ -124,7 +157,7 @@ void Settings::Deserialize(Control^ c, String^ XmlFileName) {
- 			XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
- 			xmlSerializedForm->Load(XmlFileName);
+@@ -118,20 +155,29 @@ void Settings::AddChildControls(XmlTextWriter^ xmlSerializedForm, Control^ c) {
+ 	}
+ }
+ 
+-void Settings::Deserialize(Control^ c, String^ XmlFileName) {
+-	if (File::Exists(XmlFileName)) {
+-		try {
+-			XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
+-			xmlSerializedForm->Load(XmlFileName);
++bool Settings::Deserialize(Control^ c, String^ XmlFileName) {
++	if (!File::Exists(XmlFileName))
++		return false;
  
 -			XmlNode^ topLevel = xmlSerializedForm->ChildNodes[1];
-+			XmlNode^ topLevel = xmlSerializedForm->DocumentElement;
- 			for each(XmlNode^ n in topLevel->ChildNodes)
- 				SetControlProperties(safe_cast<Control^>(c), n);
- 		}
-@@ -140,6 +173,8 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+-			for each(XmlNode^ n in topLevel->ChildNodes)
+-				SetControlProperties(safe_cast<Control^>(c), n);
+-		}
+-		catch (Exception^ ex) {
+-			Log::WriteLine("While deserializing \"" + c->Name + "\" the following exception occured: \"" + ex->Message + "\"");
+-		}
++	try {
++		XmlDocument^ xmlSerializedForm = gcnew XmlDocument();
++		xmlSerializedForm->Load(XmlFileName);
++
++		XmlNode^ topLevel = xmlSerializedForm->DocumentElement;
++		if (topLevel == nullptr || topLevel->Name != "Timelapse")
++			return false;
++
++		for each(XmlNode^ n in topLevel->ChildNodes)
++			SetControlProperties(safe_cast<Control^>(c), n);
++
++		Log::WriteLine("Loaded " + XmlFileName);
++		return true;
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("While deserializing \"" + c->Name + "\" the following exception occured: \"" + ex->Message + "\"");
+ 	}
++
++	return false;
+ }
+ 
+ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+@@ -140,6 +186,8 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
  		String^ ctrlName = n->Attributes["Name"]->Value;
  		// find the control
  		auto ctrl = currentCtrl->Controls->Find(ctrlName, true);
@@ -591,7 +807,7 @@ index 7dbfe8b..2a3c5dd 100644
  
  		// the right type too
  		if (n->Attributes["SelectedIndex"])
-@@ -153,14 +188,35 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
+@@ -153,14 +201,35 @@ void Settings::SetControlProperties(Control^ currentCtrl, XmlNode^ n) {
  		else if (n->Attributes["ItemCnt"]) {
  			int itemCnt = Convert::ToInt32(n->Attributes["ItemCnt"]->Value);
  			auto collection = safe_cast<ListBox^>(ctrl[0])->Items;
@@ -628,7 +844,7 @@ index 7dbfe8b..2a3c5dd 100644
  
  		// if n has any children that are controls, deserialize them as well
  		if (n->HasChildNodes && ctrl[0]->HasChildren) {
-@@ -180,6 +236,7 @@ String^ Settings::GetSettingsPath() {
+@@ -180,6 +249,7 @@ String^ Settings::GetSettingsPath() {
  
  	try {
  		String^ TimelapseFolderPath = Path::Combine(AppDataFolder, "Timelapse");
@@ -636,6 +852,19 @@ index 7dbfe8b..2a3c5dd 100644
  		SettingsFilePath = Path::Combine(TimelapseFolderPath, "Settings.xml");
  	}
  	catch (Exception^ ex) {
--- 
-2.51.1
-
+diff --git a/Timelapse/Settings.h b/Timelapse/Settings.h
+index 7ce77ad..5ca6c00 100644
+--- a/Timelapse/Settings.h
++++ b/Timelapse/Settings.h
+@@ -9,9 +9,9 @@ namespace Timelapse {
+ 	public ref class Settings {
+ 		public:
+ 			static Object^ Deserialize(String^ Path, XmlSerializer^ Deserializer);
+-			static void Deserialize(Control^ c, String^ Path);
++			static bool Deserialize(Control^ c, String^ Path);
+ 			static void Serialize(String^ Path, XmlSerializer^ Serializer, Object^ Collection);
+-			static void Serialize(Control^ c, String^ Path);
++			static bool Serialize(Control^ c, String^ Path);
+ 			static bool isExcluded(Control^ ctrl);
+ 			static String^ GetSettingsPath();
+ 
