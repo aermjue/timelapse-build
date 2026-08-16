@@ -21,7 +21,11 @@ jobs:
 
       - name: Download upstream source
         shell: pwsh
-        run: git clone --depth 1 https://github.com/jnpl95/Timelapse.git source
+        run: |
+          git init source
+          git -C source remote add origin https://github.com/jnpl95/Timelapse.git
+          git -C source fetch --depth 1 origin dd2e7619da4a5ca647f0cff8f9ce28ed7dc068f8
+          git -C source checkout --detach FETCH_HEAD
 
       - name: Apply Timelapse V2 fixes
         shell: pwsh
