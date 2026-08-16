@@ -1,0 +1,21 @@
+diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
+--- a/Timelapse/MainForm.cpp
++++ b/Timelapse/MainForm.cpp
+@@ -681,7 +681,7 @@ static bool SetMapleLoginFieldNative(ULONG fieldOffset, const char* text) {
+ 	if (text == nullptr)
+ 		return false;
+ 
+-	__try {
++	try {
+ 		// Refuse to call into an unexpected client build. The two vtables and
+ 		// SetText prologue below are exact values from the supplied BeiDou.exe.
+ 		if (*(ULONG*)CCtrlEditSetTextAddr != 0x0424448B)
+@@ -703,7 +703,7 @@ static bool SetMapleLoginFieldNative(ULONG fieldOffset, const char* text) {
+ 		CCtrlEdit__SetText((PVOID)edit, text);
+ 		return true;
+ 	}
+-	__except (EXCEPTION_EXECUTE_HANDLER) {
++	catch (...) {
+ 		return false;
+ 	}
+ }
