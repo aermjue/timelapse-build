@@ -35,6 +35,17 @@ jobs:
           if (-not (Test-Path -LiteralPath $patchPath)) {
             throw 'timelapse-v6.patch is missing from the repository root.'
           }
+
+          # actions/checkout converts text files to CRLF on Windows. Normalize
+          # the patch back to LF so its verified bytes match the published V6.
+          $patchText = [System.IO.File]::ReadAllText($patchPath)
+          $patchText = $patchText.Replace("`r`n", "`n").Replace("`r", "`n")
+          [System.IO.File]::WriteAllText(
+            $patchPath,
+            $patchText,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
           $actualHash = (Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualHash -ne $expectedHash) {
             throw "Wrong timelapse-v6.patch file. Expected SHA256 $expectedHash, got $actualHash."
