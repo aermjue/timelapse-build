@@ -74,11 +74,11 @@ jobs:
 
           $resourcePath = Join-Path $env:GITHUB_WORKSPACE 'source\Timelapse\Timelapse.rc'
           $resource = Get-Content -LiteralPath $resourcePath -Raw
-          $oldIconPath = 'D:\JP\Desktop\Timelapse\Timelapse.ico'
+          $oldIconPath = 'D:\\JP\\Desktop\\Timelapse\\Timelapse.ico'
           if (-not $resource.Contains($oldIconPath)) {
             throw 'The expected original icon path was not found in Timelapse.rc.'
           }
-          $resource = $resource.Replace($oldIconPath, '..\Timelapse.ico')
+          $resource = $resource.Replace($oldIconPath, '..\\Timelapse.ico')
           Set-Content -LiteralPath $resourcePath -Value $resource -Encoding unicode
 
       - name: Add MSBuild to PATH
