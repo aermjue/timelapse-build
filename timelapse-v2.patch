@@ -240,7 +240,7 @@ index 023ca14..d484aca 100644
  		}
  	}
 diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
-index 3c102b2..18e6c6b 100644
+index 3c102b2..0236f3c 100644
 --- a/Timelapse/MainForm.cpp
 +++ b/Timelapse/MainForm.cpp
 @@ -24,6 +24,7 @@ ref struct GlobalRefs {
@@ -251,48 +251,174 @@ index 3c102b2..18e6c6b 100644
  	static bool bWallVac = false, bDupeX = false, bMMC = false, bUEMI = false;
  	static UINT cccsTimerTickCount = 0;
  	static bool isDragging = false, isEmbedding = false;
-@@ -32,6 +33,7 @@ ref struct GlobalRefs {
- 	static double formOpacity;
- 	static Generic::List<MapData^>^ maps;
- 	static bool bSendPacketLog = false, bRecvPacketLog = false;
-+	static String^ settingsDialogDirectory;
- };
- 
- #pragma region General Form
-@@ -164,12 +166,63 @@ void MainForm::pnlFull_MouseMove(Object^  sender, Windows::Forms::MouseEventArgs
+@@ -164,12 +165,185 @@ void MainForm::pnlFull_MouseMove(Object^  sender, Windows::Forms::MouseEventArgs
  #pragma endregion
  
  #pragma region ToolStrip
-+static String^ GetSettingsDialogDirectory() {
-+	if (!String::IsNullOrWhiteSpace(GlobalRefs::settingsDialogDirectory) && Directory::Exists(GlobalRefs::settingsDialogDirectory))
-+		return GlobalRefs::settingsDialogDirectory;
-+
-+	String^ defaultDirectory = Path::GetDirectoryName(Settings::GetSettingsPath());
-+	if (!String::IsNullOrWhiteSpace(defaultDirectory)) {
-+		Directory::CreateDirectory(defaultDirectory);
-+		GlobalRefs::settingsDialogDirectory = defaultDirectory;
++static String^ GetSettingsProfilesDirectory() {
++	try {
++		String^ documentsDirectory = Environment::GetFolderPath(Environment::SpecialFolder::MyDocuments);
++		if (!String::IsNullOrWhiteSpace(documentsDirectory)) {
++			String^ profilesDirectory = Path::Combine(documentsDirectory, "Timelapse Profiles");
++			Directory::CreateDirectory(profilesDirectory);
++			return profilesDirectory;
++		}
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Unable to create settings profiles in Documents: " + ex->Message);
 +	}
 +
-+	return defaultDirectory;
++	String^ fallbackDirectory = Path::Combine(Path::GetDirectoryName(Settings::GetSettingsPath()), "Profiles");
++	Directory::CreateDirectory(fallbackDirectory);
++	return fallbackDirectory;
++}
++
++static String^ PromptForSettingsProfileName(Form^ owner) {
++	String^ profilesDirectory = GetSettingsProfilesDirectory();
++	Form^ dialog = gcnew Form();
++	dialog->Text = "Save Timelapse Settings Profile";
++	dialog->FormBorderStyle = FormBorderStyle::FixedDialog;
++	dialog->StartPosition = FormStartPosition::CenterParent;
++	dialog->ClientSize = System::Drawing::Size(470, 155);
++	dialog->MaximizeBox = false;
++	dialog->MinimizeBox = false;
++	dialog->ShowIcon = false;
++	dialog->ShowInTaskbar = false;
++
++	Label^ nameLabel = gcnew Label();
++	nameLabel->Text = "Profile name:";
++	nameLabel->Location = Point(15, 20);
++	nameLabel->AutoSize = true;
++	dialog->Controls->Add(nameLabel);
++
++	TextBox^ nameBox = gcnew TextBox();
++	nameBox->Location = Point(110, 17);
++	nameBox->Size = System::Drawing::Size(340, 23);
++	nameBox->Text = "farming";
++	nameBox->SelectAll();
++	dialog->Controls->Add(nameBox);
++
++	Label^ pathLabel = gcnew Label();
++	pathLabel->Text = "Saved in: " + profilesDirectory;
++	pathLabel->Location = Point(15, 58);
++	pathLabel->Size = System::Drawing::Size(435, 34);
++	pathLabel->AutoEllipsis = true;
++	dialog->Controls->Add(pathLabel);
++
++	Button^ saveButton = gcnew Button();
++	saveButton->Text = "Save";
++	saveButton->Location = Point(285, 108);
++	saveButton->Size = System::Drawing::Size(78, 28);
++	saveButton->DialogResult = System::Windows::Forms::DialogResult::OK;
++	dialog->Controls->Add(saveButton);
++
++	Button^ cancelButton = gcnew Button();
++	cancelButton->Text = "Cancel";
++	cancelButton->Location = Point(372, 108);
++	cancelButton->Size = System::Drawing::Size(78, 28);
++	cancelButton->DialogResult = System::Windows::Forms::DialogResult::Cancel;
++	dialog->Controls->Add(cancelButton);
++
++	dialog->AcceptButton = saveButton;
++	dialog->CancelButton = cancelButton;
++	dialog->ActiveControl = nameBox;
++	if (dialog->ShowDialog(owner) != System::Windows::Forms::DialogResult::OK)
++		return nullptr;
++
++	String^ profileName = nameBox->Text->Trim();
++	if (profileName->EndsWith(".xml", StringComparison::OrdinalIgnoreCase))
++		profileName = profileName->Substring(0, profileName->Length - 4)->Trim();
++
++	if (String::IsNullOrWhiteSpace(profileName) || profileName->IndexOfAny(Path::GetInvalidFileNameChars()) >= 0 || profileName->EndsWith(".")) {
++		MessageBox::Show(owner, "Please enter a valid profile name.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Warning);
++		return nullptr;
++	}
++
++	String^ settingsPath = Path::Combine(profilesDirectory, profileName + ".xml");
++	if (File::Exists(settingsPath) && MessageBox::Show(owner, "The profile already exists. Overwrite it?\n" + settingsPath,
++		"Timelapse Settings", MessageBoxButtons::YesNo, MessageBoxIcon::Question) != System::Windows::Forms::DialogResult::Yes)
++		return nullptr;
++
++	return settingsPath;
++}
++
++static String^ PromptForSettingsProfile(Form^ owner) {
++	String^ profilesDirectory = GetSettingsProfilesDirectory();
++	Generic::List<String^>^ profilePaths = gcnew Generic::List<String^>();
++	Form^ dialog = gcnew Form();
++	dialog->Text = "Open Timelapse Settings Profile";
++	dialog->FormBorderStyle = FormBorderStyle::FixedDialog;
++	dialog->StartPosition = FormStartPosition::CenterParent;
++	dialog->ClientSize = System::Drawing::Size(470, 350);
++	dialog->MaximizeBox = false;
++	dialog->MinimizeBox = false;
++	dialog->ShowIcon = false;
++	dialog->ShowInTaskbar = false;
++
++	Label^ pathLabel = gcnew Label();
++	pathLabel->Text = "Profiles in: " + profilesDirectory;
++	pathLabel->Location = Point(15, 15);
++	pathLabel->Size = System::Drawing::Size(435, 34);
++	pathLabel->AutoEllipsis = true;
++	dialog->Controls->Add(pathLabel);
++
++	ListBox^ profileList = gcnew ListBox();
++	profileList->Location = Point(15, 55);
++	profileList->Size = System::Drawing::Size(435, 235);
++	dialog->Controls->Add(profileList);
++
++	String^ defaultSettingsPath = Settings::GetSettingsPath();
++	if (File::Exists(defaultSettingsPath)) {
++		profileList->Items->Add("Default (legacy Settings.xml)");
++		profilePaths->Add(defaultSettingsPath);
++	}
++
++	try {
++		for each(String^ profilePath in Directory::GetFiles(profilesDirectory, "*.xml")) {
++			profileList->Items->Add(Path::GetFileNameWithoutExtension(profilePath));
++			profilePaths->Add(profilePath);
++		}
++	}
++	catch (Exception^ ex) {
++		Log::WriteLine("Unable to list settings profiles: " + ex->Message);
++		MessageBox::Show(owner, "Settings profiles could not be listed. Check Log.txt for details.", "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Error);
++		return nullptr;
++	}
++
++	if (profileList->Items->Count == 0) {
++		MessageBox::Show(owner, "No saved profiles were found. Use Save Settings first.\n\nProfile folder:\n" + profilesDirectory,
++			"Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
++		return nullptr;
++	}
++	profileList->SelectedIndex = 0;
++
++	Button^ openButton = gcnew Button();
++	openButton->Text = "Open";
++	openButton->Location = Point(285, 305);
++	openButton->Size = System::Drawing::Size(78, 28);
++	openButton->DialogResult = System::Windows::Forms::DialogResult::OK;
++	dialog->Controls->Add(openButton);
++
++	Button^ cancelButton = gcnew Button();
++	cancelButton->Text = "Cancel";
++	cancelButton->Location = Point(372, 305);
++	cancelButton->Size = System::Drawing::Size(78, 28);
++	cancelButton->DialogResult = System::Windows::Forms::DialogResult::Cancel;
++	dialog->Controls->Add(cancelButton);
++
++	dialog->AcceptButton = openButton;
++	dialog->CancelButton = cancelButton;
++	if (dialog->ShowDialog(owner) != System::Windows::Forms::DialogResult::OK || profileList->SelectedIndex < 0)
++		return nullptr;
++
++	return profilePaths[profileList->SelectedIndex];
 +}
 +
  void MainForm::loadSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
 -	Settings::Deserialize(this, Settings::GetSettingsPath());
-+	OpenFileDialog^ dialog = gcnew OpenFileDialog();
-+	dialog->Title = "Open Timelapse Settings";
-+	dialog->Filter = "Timelapse settings (*.xml)|*.xml|All files (*.*)|*.*";
-+	dialog->FilterIndex = 1;
-+	dialog->DefaultExt = "xml";
-+	dialog->CheckFileExists = true;
-+	dialog->CheckPathExists = true;
-+	dialog->Multiselect = false;
-+	dialog->InitialDirectory = GetSettingsDialogDirectory();
-+
-+	if (dialog->ShowDialog(this) != System::Windows::Forms::DialogResult::OK)
++	String^ settingsPath = PromptForSettingsProfile(this);
++	if (String::IsNullOrWhiteSpace(settingsPath))
 +		return;
-+
-+	String^ settingsPath = dialog->FileName;
-+	GlobalRefs::settingsDialogDirectory = Path::GetDirectoryName(settingsPath);
 +
 +	if (Settings::Deserialize(this, settingsPath))
 +		MessageBox::Show("Settings loaded successfully from:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
@@ -302,22 +428,10 @@ index 3c102b2..18e6c6b 100644
  
  void MainForm::saveSettingsToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
 -	Settings::Serialize(this, Settings::GetSettingsPath());
-+	SaveFileDialog^ dialog = gcnew SaveFileDialog();
-+	dialog->Title = "Save Timelapse Settings As";
-+	dialog->Filter = "Timelapse settings (*.xml)|*.xml|All files (*.*)|*.*";
-+	dialog->FilterIndex = 1;
-+	dialog->DefaultExt = "xml";
-+	dialog->AddExtension = true;
-+	dialog->CheckPathExists = true;
-+	dialog->OverwritePrompt = true;
-+	dialog->FileName = "Timelapse-profile.xml";
-+	dialog->InitialDirectory = GetSettingsDialogDirectory();
-+
-+	if (dialog->ShowDialog(this) != System::Windows::Forms::DialogResult::OK)
++	String^ settingsPath = PromptForSettingsProfileName(this);
++	if (String::IsNullOrWhiteSpace(settingsPath))
 +		return;
 +
-+	String^ settingsPath = dialog->FileName;
-+	GlobalRefs::settingsDialogDirectory = Path::GetDirectoryName(settingsPath);
 +	if (Settings::Serialize(this, settingsPath))
 +		MessageBox::Show("Settings saved successfully to:\n" + settingsPath, "Timelapse Settings", MessageBoxButtons::OK, MessageBoxIcon::Information);
 +	else
@@ -325,7 +439,7 @@ index 3c102b2..18e6c6b 100644
  }
  
  void MainForm::closeMapleStoryToolStripMenuItem_Click(Object^  sender, EventArgs^  e) {
-@@ -534,6 +587,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
+@@ -534,6 +708,51 @@ void MainForm::transparencyTrackBar_Scroll(Object^  sender, EventArgs^  e) {
  static int keyCollection[] = { 0x10, 0x11, 0x12, 0x20, 0x2D, 0x2E, 0x24, 0x23, 0x21, 0x22, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51,
  0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39 };
  
@@ -377,7 +491,7 @@ index 3c102b2..18e6c6b 100644
  //Check if keypress is valid
  static bool isKeyValid(Object^ sender, Windows::Forms::KeyPressEventArgs^ e, bool isSigned) {
  	bool result = true;
-@@ -704,51 +802,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
+@@ -704,51 +923,61 @@ void MainForm::comboLootKey_SelectedIndexChanged(Object^  sender, EventArgs^  e)
  
  #pragma region Auto Buffs
  void MainForm::bBuffAdd_Click(Object^  sender, EventArgs^  e) {
@@ -454,7 +568,7 @@ index 3c102b2..18e6c6b 100644
  }
  
  void MainForm::tbBuffInterval_KeyPress(Object^  sender, Windows::Forms::KeyPressEventArgs^  e) {
-@@ -968,25 +1076,38 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
+@@ -968,25 +1197,38 @@ void MainForm::cbBlinkGodmode_CheckedChanged(Object^  sender, EventArgs^  e) {
  }
  
  void ClickTeleport() {
@@ -499,7 +613,7 @@ index 3c102b2..18e6c6b 100644
  		GlobalRefs::bClickTeleport = true;
  		NewThread(ClickTeleport);
  	}
-@@ -996,6 +1117,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
+@@ -996,6 +1238,13 @@ void MainForm::cbClickTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
   
  void MainForm::cbMouseTeleport_CheckedChanged(Object^  sender, EventArgs^  e) {
  	if (this->cbMouseTeleport->Checked) {
