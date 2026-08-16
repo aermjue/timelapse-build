@@ -1,18 +1,18 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From db04c26e4c59cb4d744c2c53592dac171fc5ef39 Mon Sep 17 00:00:00 2001
 From: Codex <codex@local>
 Date: Sat, 15 Aug 2026 20:05:28 -0400
 Subject: [PATCH] Fix settings, auto buff, and mouse teleport
 
 ---
- Timelapse/Log.cpp      |   3 +-
- Timelapse/Macro.h      | 106 ++++++++++++++++++++++++--------------
- Timelapse/MainForm.cpp | 113 +++++++++++++++++++++++++++++++++--------
- Timelapse/MainForm.h   |   5 +-
- Timelapse/Settings.cpp |  99 ++++++++++++++++++++++++++++--------
- 5 files changed, 245 insertions(+), 81 deletions(-)
+ Timelapse/Log.cpp      |   1 +
+ Timelapse/Macro.h      | 104 +++++++++++++++++++++++++-------------
+ Timelapse/MainForm.cpp | 111 ++++++++++++++++++++++++++++++++++-------
+ Timelapse/MainForm.h   |   3 +-
+ Timelapse/Settings.cpp |  97 +++++++++++++++++++++++++++--------
+ 5 files changed, 240 insertions(+), 76 deletions(-)
 
 diff --git a/Timelapse/Log.cpp b/Timelapse/Log.cpp
-index 3d84ec7..dd9cd77 100644
+index 3d84ec7..2c2d0ae 100644
 --- a/Timelapse/Log.cpp
 +++ b/Timelapse/Log.cpp
 @@ -31,6 +31,7 @@ String^ Log::GetLogPath() {
@@ -23,15 +23,8 @@ index 3d84ec7..dd9cd77 100644
  		LogsFilePath = Path::Combine(TimelapseFolderPath, "Log.txt");
  	} 
  	catch (Exception^){}
-@@ -51,4 +52,4 @@ String^ Log::GetLogPath() {
- 	while (MainForm::TheInstance->lbConsoleLog->Items->Count > LOG_MAX_LINES) {
- 		MainForm::TheInstance->lbConsoleLog->Items->RemoveAt(MainForm::TheInstance->lbConsoleLog->Items->Count - 1);
- 	}
--}
-\ No newline at end of file
-+}
 diff --git a/Timelapse/Macro.h b/Timelapse/Macro.h
-index 023ca14..208d91b 100644
+index 023ca14..d484aca 100644
 --- a/Timelapse/Macro.h
 +++ b/Timelapse/Macro.h
 @@ -25,20 +25,24 @@ typedef struct tag_KEYDATA {
@@ -245,7 +238,7 @@ index 023ca14..208d91b 100644
  		if (DBG_Macro) DebugMacro(this);
  		Threading::TimerCallback^ TimerDelegate = gcnew Threading::TimerCallback(this, &Macro::TimerElapsed);
  		timer = gcnew Threading::Timer(TimerDelegate, nullptr, Threading::Timeout::Infinite, delay);
-@@ -259,10 +287,14 @@ public:
+@@ -259,9 +287,13 @@ public:
  	// TODO: if buffMacro check if i have it present if not cast it for first time
  	void Toggle(bool enable) {	
  		if (enable) {
@@ -259,11 +252,8 @@ index 023ca14..208d91b 100644
  			timer->Change(Threading::Timeout::Infinite, Threading::Timeout::Infinite);					
  		}
  	}
--};
-\ No newline at end of file
-+};
 diff --git a/Timelapse/MainForm.cpp b/Timelapse/MainForm.cpp
-index 3c102b2..282182c 100644
+index 3c102b2..e32c75d 100644
 --- a/Timelapse/MainForm.cpp
 +++ b/Timelapse/MainForm.cpp
 @@ -24,6 +24,7 @@ ref struct GlobalRefs {
@@ -457,15 +447,8 @@ index 3c102b2..282182c 100644
  		GlobalRefs::bMouseTeleport = true;
  		NewThread(MouseTeleport);
  	}
-@@ -2927,4 +3000,4 @@ auto StringPool__GetString = (pfnStringPool__GetString)0x0079E993;	//0x00406455;
- typedef char**(__stdcall *pfnCItemInfo__GetMapString)(PVOID, PVOID, char*, UINT, const char*);
- auto CItemInfo__GetMapString = (pfnCItemInfo__GetMapString)0x005CF792;*/
- 
--#pragma endregion
-\ No newline at end of file
-+#pragma endregion
 diff --git a/Timelapse/MainForm.h b/Timelapse/MainForm.h
-index 7e68e46..24f4000 100644
+index 7e68e46..43285de 100644
 --- a/Timelapse/MainForm.h
 +++ b/Timelapse/MainForm.h
 @@ -2504,6 +2504,7 @@ public:
@@ -485,15 +468,8 @@ index 7e68e46..24f4000 100644
  			this->lvBuffHeaderInterval->Width = 80;
  			// 
  			// tabPage12
-@@ -6789,4 +6790,4 @@ public:
- private: System::Void HPPotDelay_TextChanged(System::Object^ sender, System::EventArgs^ e) {
- }
- };
--};
-\ No newline at end of file
-+};
 diff --git a/Timelapse/Settings.cpp b/Timelapse/Settings.cpp
-index 7dbfe8b..67819a1 100644
+index 7dbfe8b..2a3c5dd 100644
 --- a/Timelapse/Settings.cpp
 +++ b/Timelapse/Settings.cpp
 @@ -49,28 +49,41 @@ void Settings::Serialize(String^ path, XmlSerializer^ serializer, Object^ object
@@ -660,10 +636,6 @@ index 7dbfe8b..67819a1 100644
  		SettingsFilePath = Path::Combine(TimelapseFolderPath, "Settings.xml");
  	}
  	catch (Exception^ ex) {
-@@ -188,4 +245,4 @@ String^ Settings::GetSettingsPath() {
- 
- 	Log::WriteLine("Generated path to Timelapse settings file at" + ": " + SettingsFilePath);
- 	return SettingsFilePath;
--}
-\ No newline at end of file
-+}
+-- 
+2.51.1
+
